@@ -29,6 +29,13 @@
     .menu-btn { width:100%; text-align:left; background:#eef3f8; color:#243140; border-radius:10px; padding:11px 12px; }
     .menu-btn.active { background:#d9e8f6; color:#0f4c81; }
     main { flex:1; min-width:0; padding:16px 28px 40px; background:var(--bg); }
+    .home-head { display:flex; justify-content:flex-end; margin-bottom:12px; }
+    .home-head select, .home-head input { width:180px; }
+    .home-head { gap:8px; align-items:center; }
+    .stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; margin-bottom:16px; }
+    .stat { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
+    .num { font-size:32px; font-weight:650; margin:4px 0; }
+    #home.hidden, #page-head.hidden { display:none; }
         h1 { font-size:22px; margin:0; line-height:40px; font-weight:650; }
     h2 { font-size:18px; margin:0 0 14px; }
     .roster { width:100%; border-collapse:collapse; }
@@ -113,18 +120,44 @@
   <aside class="sidebar">
     <div class="sidebar-inner">
       <div class="side-head">
-        <strong>菜单</strong>
         <button id="hide-menu" class="icon-btn" type="button" title="收起侧栏"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
       </div>
             <div id="menu-list" class="menu-list"></div>
     </div>
   </aside>
   <main>
-    <div class="top">
+    <section id="home">
+      <div class="home-head">
+        <div></div>
+        <input id="home-start" type="datetime-local">
+        <span class="muted">至</span>
+        <input id="home-end" type="datetime-local">
+        <button id="home-custom" class="ghost" type="button">查询</button>
+        <select id="home-range">
+          <option value="1h" selected>最近 1 小时</option>
+          <option value="6h">最近 6 小时</option>
+          <option value="24h">最近 24 小时</option>
+          <option value="7d">最近 7 天</option>
+          <option value="custom">自定义</option>
+        </select>
+      </div>
+      <div class="stats">
+        <article class="stat"><div class="muted">正在监控</div><div class="num" id="home-watching">-</div><div class="muted" id="home-paused"> </div></article>
+        <article class="stat"><div class="muted">今日告警</div><div class="num" id="home-alerts">-</div><div class="muted" id="home-range-label">最近 1 小时</div></article>
+        <article class="stat"><div class="muted">飞书送达</div><div class="num" id="home-delivered">-</div><div class="muted" id="home-failed"> </div></article>
+        <article class="stat"><div class="muted">日志源</div><div class="num" id="home-sources">-</div><div class="muted">当前项目正在使用</div></article>
+      </div>
+      <div class="panel">
+        <h2>需要处理</h2>
+        <div id="home-attention" class="meta">正在读取…</div>
+      </div>
+    </section>
+
+    <div class="top" id="page-head">
       <div class="title-row">
         
         <h1 id="page-title">日志告警</h1>
-        <div class="who"><span id="who"></span><button id="logout" class="ghost" type="button">退出</button></div>
+        <div class="who"><span id="who"></span></div>
       </div>
     </div>
     
@@ -135,8 +168,8 @@
       <input id="name" placeholder="例如 支付服务">
       <label>日志源</label>
       <select id="source-id"></select>
-      <label>命名空间</label>
-      <input id="namespace" placeholder="例如 jzai">
+      <label>命名空间，多个用逗号或换行</label>
+      <textarea id="namespace" placeholder="jzai"></textarea>
       <label>容器，多个用逗号或换行。留空表示整个命名空间</label>
       <textarea id="containers" placeholder="ai-pay-app"></textarea>
       <div class="row"><button id="find-containers" class="ghost" type="button">从日志源检索容器</button></div>
@@ -160,7 +193,7 @@
       <div class="user-tools">
         <input id="user-search" placeholder="搜索用户名或显示名">
         <button id="open-add-user" type="button">新增</button>
-        <button id="open-my-password" class="ghost" type="button">修改我的密码</button>
+        <button id="open-my-password" class="ghost" type="button">修改我的密码</button><button id="logout" class="ghost" type="button">退出</button>
       </div>
       <div id="user-list"></div>
       <p id="user-count" class="meta"></p>
@@ -229,7 +262,7 @@
       <div class="row"><button id="grant-save" type="button">保存授权</button><button id="grant-cancel" class="ghost" type="button">取消</button></div>
       <p id="grant-error" class="bad"></p>
     </div>
-    <div id="main-content" class="content">
+    <div id="main-content" class="content hidden">
       <section>
         <div class="section-head"><button id="new-project" type="button">新建项目</button></div>
         <div id="rules" class="meta">正在读取…</div>
@@ -259,7 +292,8 @@ async function boot() {
   currentUser = await response.json();
   document.body.classList.add("authed");
   $("who").textContent = currentUser.display_name + (currentUser.is_admin ? " · 管理员" : "");
-    refresh();
+  showOnly("home");
+  refresh();
 }
 $("login-form").onsubmit = async (event) => {
   event.preventDefault();
@@ -445,6 +479,37 @@ function openSourceForm(source) {
   $("source-project").value = source ? source.project_id : "1";
   $("source-error").textContent = "";
 }
+
+if (localStorage.getItem("vmlog-home-range")) $("home-range").value = localStorage.getItem("vmlog-home-range");
+$("home-range").addEventListener("change", () => { if ($("home-range").value !== "custom") loadHome(); });
+$("home-custom").onclick = () => { $("home-range").value = "custom"; loadHome(); };
+if (localStorage.getItem("vmlog-home-start")) $("home-start").value = localStorage.getItem("vmlog-home-start");
+if (localStorage.getItem("vmlog-home-end")) $("home-end").value = localStorage.getItem("vmlog-home-end");
+async function loadHome() {
+  const range = $("home-range").value || "1h";
+  localStorage.setItem("vmlog-home-range", range);
+  let url = "/api/home?range=" + encodeURIComponent(range);
+  if (range === "custom") {
+    const start = $("home-start").value;
+    const end = $("home-end").value;
+    if (!start || !end) { $("home-range-label").textContent = "请选择开始和结束时间"; return; }
+    localStorage.setItem("vmlog-home-start", start);
+    localStorage.setItem("vmlog-home-end", end);
+    url += "&start=" + encodeURIComponent(start) + "&end=" + encodeURIComponent(end);
+  }
+  const response = await fetch(url);
+  const data = await response.json();
+  if (!response.ok) { $("home-attention").textContent = data.error || "首页读取失败"; return; }
+  $("home-watching").textContent = data.watching;
+  $("home-paused").textContent = data.paused ? data.paused + " 个已暂停" : "没有暂停的项目";
+  $("home-alerts").textContent = data.alerts_today;
+  $("home-range-label").textContent = range === "custom" ? ($("home-start").value.replace("T", " ") + " 至 " + $("home-end").value.replace("T", " ")) : $("home-range").selectedOptions[0].textContent;
+  $("home-delivered").textContent = data.delivered;
+  $("home-failed").textContent = data.failed ? data.failed + " 条发送失败" : "没有发送失败";
+  $("home-sources").textContent = data.sources;
+  const rows = (data.attention || []).map(item => `<tr><td>${escapeHtml(item.project)}</td><td>${escapeHtml(item.detail)}</td><td>${escapeHtml(item.time || "")}</td></tr>`).join("");
+  $("home-attention").innerHTML = rows ? `<table class="roster"><thead><tr><th>项目</th><th>情况</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table>` : "目前没有需要处理的事项。";
+}
 async function loadPeople() {
   const data = await (await fetch("/api/users")).json();
   peopleData = { users: data.users || [], rules: data.rules || [] };
@@ -497,7 +562,7 @@ function fill(rule) {
   $("rule-id").value = rule ? rule.id : "";
   $("name").value = rule ? rule.name : "";
   $("source-id").value = rule && rule.source_id ? rule.source_id : ($("source-id").value || "");
-  $("namespace").value = rule ? rule.namespace : "";
+  $("namespace").value = rule ? (Array.isArray(rule.namespace) ? rule.namespace.join("\n") : rule.namespace) : "";
   $("containers").value = rule ? (rule.containers || []).join("\n") : "";
   $("keywords").value = rule ? (rule.keywords || []).join("\n") : "";
   $("cooldown").value = rule ? rule.cooldown_sec : 300;
@@ -523,23 +588,26 @@ function hitTip(hits) {
 function showOnly(panel) {
   $("editor").classList.toggle("hidden", panel !== "editor");
   $("people").classList.toggle("hidden", panel !== "people");
-  const titles = { people: "用户管理", sources: "日志源管理", hooks: "告警管理" };
+  const titles = { home: "值班台", people: "用户管理", sources: "日志源管理", hooks: "告警管理", projects: "项目管理", editor: "项目管理" };
   $("page-title").textContent = titles[panel] || "项目管理";
-  $("main-content").classList.toggle("hidden", panel === "people" || panel === "sources" || panel === "hooks");
+  $("home").classList.toggle("hidden", panel !== "home");
+  $("page-head").classList.toggle("hidden", panel === "home");
+  $("main-content").classList.toggle("hidden", panel !== "projects" && panel !== "editor");
   $("sources").classList.toggle("hidden", panel !== "sources");
   $("hooks").classList.toggle("hidden", panel !== "hooks");
+  if (panel === "home") loadHome();
   if ($("new-project")) $("new-project").hidden = !(currentUser && currentUser.is_admin);
 }
 function renderMenu() {
   const usersOpen = !$("people").classList.contains("hidden");
-  const items = [{ id: "projects", name: "项目管理", kind: "projects" }];
+  const items = [{ id: "home", name: "首页", kind: "home" }, { id: "projects", name: "项目管理", kind: "projects" }];
   if (currentUser && currentUser.is_admin) {
     items.push({ id: "sources", name: "日志源管理", kind: "sources" });
     items.push({ id: "hooks", name: "告警管理", kind: "hooks" });
     items.push({ id: "users", name: "用户管理", kind: "users" });
   }
   $("menu-list").innerHTML = items.map(item => {
-    const openKind = !$("people").classList.contains("hidden") ? "users" : !$("sources").classList.contains("hidden") ? "sources" : !$("hooks").classList.contains("hidden") ? "hooks" : "projects";
+    const openKind = !$("people").classList.contains("hidden") ? "users" : !$("sources").classList.contains("hidden") ? "sources" : !$("hooks").classList.contains("hidden") ? "hooks" : !$("home").classList.contains("hidden") ? "home" : "projects";
     const active = item.kind === openKind;
     return `<button class="menu-btn${active ? " active" : ""}" type="button" data-menu="${item.kind}">${escapeHtml(item.name)}</button>`;
   }).join("");
@@ -547,6 +615,7 @@ function renderMenu() {
     if (btn.dataset.menu === "users") { showOnly("people"); loadPeople(); renderMenu(); }
     else if (btn.dataset.menu === "sources") { showOnly("sources"); loadSources(); renderMenu(); }
     else if (btn.dataset.menu === "hooks") { showOnly("hooks"); loadHooks(); renderMenu(); }
+    else if (btn.dataset.menu === "home") { showOnly("home"); renderMenu(); }
     else { showOnly("projects"); renderMenu(); }
   });
   if ($("new-project")) $("new-project").hidden = !(currentUser && currentUser.is_admin);
@@ -563,7 +632,7 @@ function projectRow(rule) {
   const containerText = containers.length
     ? "<button type=\"button\" class=\"linkish\" data-toggle-containers>" + containers.length + " 个容器</button><div class=\"container-names hidden\">" + escapeHtml(containers.join("、")) + "</div>"
     : "全部容器";
-  const scope = escapeHtml(rule.source_name || "未选日志源") + "<br>" + escapeHtml(rule.namespace) + " / " + containerText;
+  const scope = escapeHtml(rule.source_name || "未选日志源") + "<br>" + escapeHtml(Array.isArray(rule.namespace) ? rule.namespace.join("、") : rule.namespace) + " / " + containerText;
   const words = escapeHtml((rule.keywords || []).join("、"));
   return "<tr><td><strong>" + escapeHtml(rule.name) + "</strong></td><td><span class=\"state " + state + "\">" + (stateText[state] || state) + "</span></td><td class=\"meta\">" + scope + "<br>关键字：" + words + "</td><td><div class=\"row\"><button class=\"ghost\" data-edit=\"" + rule.id + "\">修改</button><button class=\"ghost\" data-pause=\"" + rule.id + "\">" + pause + "</button>" + admin + "</div></td></tr>";
 }
@@ -742,21 +811,34 @@ $("hide-menu").onclick = () => setMenu(shell.classList.contains("collapsed"));
 $("reset").onclick = () => fill(null);
 
 $("find-containers").onclick = async () => {
-  $("container-picker").textContent = "正在检索…";
+  $("container-picker").textContent = "正在按命名空间检索…";
   const params = new URLSearchParams({ source_id: $("source-id").value, namespace: $("namespace").value.trim() });
   const response = await fetch("/api/containers?" + params.toString());
   const result = await response.json();
   if (!response.ok) { $("container-picker").textContent = result.error || "检索失败"; return; }
-  if (!result.length) { $("container-picker").textContent = "这个命名空间下最近 6 小时没有容器。"; return; }
+  if (!result.length) { $("container-picker").textContent = "这些命名空间最近 6 小时没有容器。"; return; }
   const selected = new Set(lines($("containers").value));
-  $("container-picker").innerHTML = result.map(name => `<label class="check"><input type="checkbox" value="${escapeHtml(name)}" ${selected.has(name) ? "checked" : ""}> ${escapeHtml(name)}</label>`).join("")
-    + '<div class="row"><button id="import-containers" type="button">导入到项目</button></div>';
+  const groups = {};
+  result.forEach(item => {
+    const namespace = item.namespace || "";
+    const name = item.name || "";
+    if (!groups[namespace]) groups[namespace] = [];
+    groups[namespace].push(name);
+  });
+  const html = Object.keys(groups).map(namespace => {
+    const boxes = groups[namespace].map(name => {
+      const key = namespace + "/" + name;
+      const checked = selected.has(key) || selected.has(name);
+      return `<label class="check"><input type="checkbox" value="${escapeHtml(key)}" ${checked ? "checked" : ""}> ${escapeHtml(name)}</label>`;
+    }).join("");
+    return `<div class="meta"><strong>${escapeHtml(namespace)}</strong></div>${boxes}`;
+  }).join("") + '<div class="row"><button id="import-containers" type="button">导入到项目</button></div>';
+  $("container-picker").innerHTML = html;
   $("import-containers").onclick = () => {
     const picked = [...$("container-picker").querySelectorAll("input")].map(item => item.value);
     $("container-picker").querySelectorAll("input").forEach(item => { item.checked = true; });
     const merged = [...new Set(lines($("containers").value).concat(picked))];
     $("containers").value = merged.join("\n");
-    $("container-picker").insertAdjacentHTML("beforeend", `<div class="meta">已导入 ${picked.length} 个容器。再次检索时，这些容器会保持选中。保存项目后生效。</div>`);
   };
 };
 $("save").onclick = async () => {

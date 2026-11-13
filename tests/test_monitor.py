@@ -66,6 +66,13 @@ class MonitorTests(unittest.TestCase):
             "keywords": ["[ERROR]"],
         })
         self.assertIn('namespace="jzai"', query)
+        multi = build_query({"namespace": ["jzai", "public"], "containers": [], "keywords": ["ERROR"]})
+        self.assertIn('{namespace="jzai"}', multi)
+        self.assertIn('{namespace="public"}', multi)
+        scoped = build_query({"namespace": ["jzai", "public"], "containers": ["jzai/app-a", "public/app-b"], "keywords": ["ERROR"]})
+        self.assertIn('{namespace="jzai",container_name=~"app\\\\-a"}', scoped)
+        self.assertIn('{namespace="public",container_name=~"app\\\\-b"}', scoped)
+        self.assertNotIn("app-a", scoped.split("public")[1])
         self.assertIn('i("[ERROR]")', query)
         self.assertNotIn("kubernetes.pod_namespace", query)
 
@@ -122,7 +129,7 @@ class MonitorTests(unittest.TestCase):
 
     def test_page_uses_current_words(self):
         page = app.WEB_PATH.read_text(encoding="utf-8")
-        self.assertIn("正在监控的项目", page)
+        self.assertIn("项目管理", page)
         self.assertIn("监控中", page)
         self.assertNotIn("盯着", page)
 

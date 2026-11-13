@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import hashlib
 import json
@@ -118,17 +118,54 @@ def should_watch(rule):
     return bool(rule.get("enabled")) and not rule.get("paused")
 
 
+
+def namespace_list(value):
+    if isinstance(value, list):
+        items = value
+    else:
+        items = re.split(r"[\n,，]+", str(value or ""))
+    result = []
+    for item in items:
+        name = str(item).strip()
+        if name and name not in result:
+            result.append(name)
+    return result
+
+
+def container_groups(rule):
+    grouped = {name: [] for name in namespace_list(rule.get("namespace"))}
+    plain = []
+    for item in rule.get("containers") or []:
+        text = str(item).strip()
+        if not text:
+            continue
+        if "/" in text:
+            namespace, container = text.split("/", 1)
+            namespace = namespace.strip()
+            container = container.strip()
+            if namespace and container:
+                grouped.setdefault(namespace, []).append(container)
+        else:
+            plain.append(text)
+    for namespace in list(grouped):
+        for container in plain:
+            if container not in grouped[namespace]:
+                grouped[namespace].append(container)
+    return grouped
+
+
 def build_query(rule):
-    filters = [f"namespace={logsql_quote(rule['namespace'].strip())}"]
-    containers = [item.strip() for item in rule.get("containers", []) if item.strip()]
-    if containers:
-        pattern = "|".join(re.escape(item) for item in containers)
-        filters.append(f"container_name=~{logsql_quote(pattern)}")
+    groups = container_groups(rule)
+    parts = []
+    for namespace, containers in groups.items():
+        if containers:
+            pattern = "|".join(re.escape(item) for item in containers)
+            parts.append("{namespace=%s,container_name=~%s}" % (logsql_quote(namespace), logsql_quote(pattern)))
+        else:
+            parts.append("{namespace=%s}" % logsql_quote(namespace))
+    selector = " OR ".join(parts) if parts else "*"
     words = " OR ".join(f"i({logsql_quote(item)})" for item in rule["keywords"])
-    return (
-        "{" + ",".join(filters) + "} (" + words + ") | fields _time,_stream_id,_msg,"
-        "kubernetes.pod_name,container_name,namespace"
-    )
+    return selector + " (" + words + ") | fields _time,_stream_id,_msg,kubernetes.pod_name,container_name,namespace"
 
 
 class Store:
@@ -187,6 +224,7 @@ class Store:
                 self._ensure_column(cursor, "rules", "paused", "TINYINT NOT NULL DEFAULT 0")
                 self._ensure_column(cursor, "rules", "source_id", "VARCHAR(32) NOT NULL DEFAULT ''")
                 self._ensure_column(cursor, "rules", "webhook_id", "VARCHAR(32) NOT NULL DEFAULT ''")
+                cursor.execute("ALTER TABLE rules MODIFY namespace_name TEXT NOT NULL")
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS webhooks (
@@ -544,7 +582,7 @@ class Store:
                         source_id=VALUES(source_id)
                     """,
                     (
-                        rule["id"], rule["name"], rule["namespace"],
+                        rule["id"], rule["name"], json.dumps(namespace_list(rule.get("namespace")), ensure_ascii=False),
                         json.dumps(rule["containers"], ensure_ascii=False),
                         json.dumps(rule["keywords"], ensure_ascii=False),
                         rule["cooldown_sec"], 1 if rule["enabled"] else 0,
@@ -609,6 +647,71 @@ class Store:
                     grouped.setdefault(row["rule_id"], {})[row["container_name"]] = int(row["hit_count"])
                 return grouped
 
+
+    def home_summary(self, rule_ids, range_key="1h", start_at=None, end_at=None):
+        spans = {"1h": timedelta(hours=1), "6h": timedelta(hours=6), "24h": timedelta(hours=24), "7d": timedelta(days=7)}
+        if start_at and end_at:
+            start, end = start_at, end_at
+            range_key = "custom"
+        elif range_key not in spans:
+            range_key = "1h"
+            start = (datetime.now() - spans[range_key]).strftime("%Y-%m-%d %H:%M:%S")
+            end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            start = (datetime.now() - spans[range_key]).strftime("%Y-%m-%d %H:%M:%S")
+            end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not rule_ids:
+            return {"watching": 0, "paused": 0, "alerts_today": 0, "delivered": 0, "failed": 0, "sources": 0, "attention": [], "range": range_key}
+        marks = ",".join(["%s"] * len(rule_ids))
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT delivered, COUNT(*) AS total FROM alerts WHERE created_at>=%s AND created_at<=%s AND rule_id IN ({marks}) GROUP BY delivered",
+                    [start, end, *rule_ids],
+                )
+                delivered = failed = 0
+                for row in cursor.fetchall():
+                    if row["delivered"]:
+                        delivered = int(row["total"])
+                    else:
+                        failed = int(row["total"])
+                cursor.execute(
+                    f"""
+                    SELECT project, keyword_text, created_at, error_text
+                    FROM alerts WHERE created_at>=%s AND created_at<=%s AND rule_id IN ({marks}) AND delivered=0
+                    ORDER BY id DESC LIMIT 8
+                    """,
+                    [start, end, *rule_ids],
+                )
+                failed_rows = cursor.fetchall()
+                cursor.execute(
+                    f"""
+                    SELECT project, COUNT(*) AS total
+                    FROM alerts WHERE created_at>=%s AND created_at<=%s AND rule_id IN ({marks})
+                    GROUP BY project ORDER BY total DESC LIMIT 5
+                    """,
+                    [start, end, *rule_ids],
+                )
+                hot = cursor.fetchall()
+        attention = []
+        for row in failed_rows:
+            created = row["created_at"]
+            attention.append({
+                "project": row["project"],
+                "detail": "飞书发送失败" + (("：" + row["error_text"]) if row["error_text"] else ""),
+                "time": created.strftime("%H:%M") if hasattr(created, "strftime") else str(created),
+            })
+        for row in hot:
+            if int(row["total"]) >= 10:
+                attention.append({"project": row["project"], "detail": f"今日已告警 {int(row['total'])} 次", "time": "今天"})
+        return {
+            "delivered": delivered,
+            "failed": failed,
+            "alerts_today": delivered + failed,
+            "attention": attention[:8],
+            "range": range_key,
+        }
+
     def list_alerts(self, rule_id="", container="", keyword="", limit=200):
         if not rule_id:
             return []
@@ -654,7 +757,7 @@ class Store:
         return {
             "id": row["id"],
             "name": row["name"],
-            "namespace": row["namespace_name"],
+            "namespace": namespace_list(json.loads(row["namespace_name"]) if str(row["namespace_name"]).lstrip().startswith("[") else row["namespace_name"]),
             "containers": json.loads(row["containers"] or "[]"),
             "keywords": json.loads(row["keywords"] or "[]"),
             "cooldown_sec": int(row["cooldown_sec"]),
@@ -707,44 +810,63 @@ class Monitor:
 
 
     def list_containers(self, source_id, namespace):
-        namespace = (namespace or "").strip()
-        if not namespace:
+        namespaces = namespace_list(namespace)
+        if not namespaces:
             raise ValueError("请先填写命名空间")
         source = next((item for item in self.store.list_sources() if item["id"] == source_id), None)
         if not source:
             raise ValueError("请先选择日志源")
-        query = "_time:6h {namespace=%s} | stats by (container_name) count() as hits | sort by (hits) desc" % logsql_quote(namespace)
-        url = source["base_url"].rstrip("/") + "/select/logsql/query"
-        data = urllib.parse.urlencode({"query": query}).encode()
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "AccountID": str(source["account_id"]),
-                "ProjectID": str(source["project_id"]),
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-        except Exception as exc:
-            raise RuntimeError("日志源查询失败") from exc
-        names = []
-        for line in raw.splitlines():
-            if not line.strip():
-                continue
-            item = json.loads(line)
-            name = str(item.get("container_name") or "").strip()
-            if name and name not in names:
-                names.append(name)
-        return names
+        found = []
+        seen = set()
+        for namespace in namespaces:
+            query = "_time:6h {namespace=%s} | stats by (container_name) count() as hits | sort by (hits) desc" % logsql_quote(namespace)
+            url = source["base_url"].rstrip("/") + "/select/logsql/query"
+            data = urllib.parse.urlencode({"query": query}).encode()
+            request = urllib.request.Request(
+                url,
+                data=data,
+                headers={
+                    "AccountID": str(source["account_id"]),
+                    "ProjectID": str(source["project_id"]),
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    raw = response.read().decode("utf-8", errors="replace")
+            except Exception as exc:
+                raise RuntimeError("日志源查询失败") from exc
+            for line in raw.splitlines():
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                name = str(item.get("container_name") or "").strip()
+                key = (namespace, name)
+                if name and key not in seen:
+                    seen.add(key)
+                    found.append({"namespace": namespace, "name": name})
+        return found
 
     def start(self):
         for rule in list(self.rules):
             if should_watch(rule):
                 self._start_worker(rule)
+
+
+    def home(self, user, range_key="1h", start_at=None, end_at=None):
+        allowed = self.allowed_rule_ids(user)
+        with self.lock:
+            rules = [rule for rule in self.rules if rule["id"] in allowed]
+        summary = self.store.home_summary([rule["id"] for rule in rules], range_key, start_at, end_at)
+        summary["watching"] = sum(1 for rule in rules if should_watch(rule))
+        summary["paused"] = sum(1 for rule in rules if rule.get("paused"))
+        summary["sources"] = len({rule.get("source_id") for rule in rules if rule.get("source_id")})
+        for rule in rules:
+            if rule.get("paused"):
+                summary["attention"].append({"project": rule["name"], "detail": "监控已暂停", "time": ""})
+        summary["attention"] = summary["attention"][:8]
+        return summary
 
     def snapshot(self, user):
         allowed = self.allowed_rule_ids(user)
@@ -848,10 +970,10 @@ class Monitor:
 
     def _normalize(self, payload, rule_id):
         name = str(payload.get("name", "")).strip()
-        namespace = str(payload.get("namespace", "")).strip()
+        namespaces = self._split(payload.get("namespace", ""))[:50]
         containers = self._split(payload.get("containers", ""))
         keywords = self._split(payload.get("keywords", ""))
-        if not name or not namespace or not keywords:
+        if not name or not namespaces or not keywords:
             raise ValueError("项目名、命名空间和至少一个关键字都要填写")
         try:
             cooldown = int(payload.get("cooldown_sec", 300))
@@ -860,7 +982,7 @@ class Monitor:
         return {
             "id": rule_id or str(int(time.time() * 1000)),
             "name": name[:40],
-            "namespace": namespace[:80],
+            "namespace": namespaces,
             "containers": containers[:500],
             "keywords": keywords[:30],
             "cooldown_sec": min(max(cooldown, 30), 86400),
@@ -1056,7 +1178,9 @@ class TailWorker(threading.Thread):
         count = bucket["count"]
         bucket["count"] = 0
         bucket["last_sent"] = now
-        place = f"{self.rule['namespace']} / {container or '未识别容器'} / {pod or '未识别实例'}"
+        ns_text = "、".join(namespace_list(self.rule.get("namespace")))
+        log_namespace = str(entry.get("namespace") or ns_text)
+        place = f"{log_namespace} / {container or '未识别容器'} / {pod or '未识别实例'}"
         if count == 1:
             text = (
                 "【日志告警】\n"
@@ -1076,7 +1200,7 @@ class TailWorker(threading.Thread):
                 f"时间：{when}\n"
                 f"日志：{message}"
             )
-        self._emit(text, keyword, message, container, pod, when, count)
+        self._emit(text, keyword, message, container, pod, when, count, log_namespace)
 
     def _matched_keyword(self, message):
         folded = message.lower()
@@ -1085,7 +1209,7 @@ class TailWorker(threading.Thread):
                 return keyword
         return ""
 
-    def _emit(self, text, keyword, message, container, pod, when, count=1):
+    def _emit(self, text, keyword, message, container, pod, when, count=1, log_namespace=""):
         delivered = True
         error = ""
         try:
@@ -1098,7 +1222,7 @@ class TailWorker(threading.Thread):
             "project": self.rule["name"],
             "rule_id": self.rule["id"],
             "keyword": keyword,
-            "namespace": self.rule["namespace"],
+            "namespace": (log_namespace or "")[:80],
             "container": container,
             "pod": pod,
             "log_time": when,
@@ -1125,6 +1249,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/status":
             self._send_json(self.monitor.snapshot(user))
+            return
+        if path == "/api/home":
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            range_key = (query.get("range") or ["1h"])[0]
+            start_at = (query.get("start") or [""])[0].replace("T", " ")
+            end_at = (query.get("end") or [""])[0].replace("T", " ")
+            if start_at and len(start_at) == 16:
+                start_at += ":00"
+            if end_at and len(end_at) == 16:
+                end_at += ":00"
+            if range_key == "custom" and start_at and end_at and start_at > end_at:
+                self._send_json({"error": "开始时间不能晚于结束时间"}, 400)
+                return
+            self._send_json(self.monitor.home(user, range_key, start_at or None, end_at or None))
             return
         if path == "/api/containers":
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)

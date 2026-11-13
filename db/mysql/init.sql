@@ -10,7 +10,7 @@ USE vmlog_monitor;
 CREATE TABLE IF NOT EXISTS rules (
   id VARCHAR(32) NOT NULL,
   name VARCHAR(80) NOT NULL,
-  namespace_name VARCHAR(80) NOT NULL,
+  namespace_name TEXT NOT NULL,
   containers TEXT NOT NULL,
   keywords TEXT NOT NULL,
   cooldown_sec INT NOT NULL,
