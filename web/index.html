@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>日志告警</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#62707d; --line:#e4e7eb; --bg:#f5f7fa; --card:#fff; --accent:#1769aa; --menu:232px; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:"Segoe UI", "PingFang SC", sans-serif; color:var(--ink); background:var(--bg); }
+    .shell { display:flex; min-height:100vh; }
+    .sidebar { width:220px; flex:0 0 220px; background:#fff; border-right:1px solid var(--line); transition:width .18s ease, flex-basis .18s ease; }
+    .shell.collapsed .sidebar { width:56px; flex-basis:56px; }
+    .sidebar-inner { min-height:100vh; padding:12px 10px 24px; display:flex; flex-direction:column; gap:12px; }
+    .shell.collapsed .sidebar-inner { padding:12px 8px; align-items:center; }
+    .side-head { display:flex; align-items:center; justify-content:flex-end; min-height:40px; }
+    .shell.collapsed .side-head { justify-content:center; }
+    .shell.collapsed .side-head strong,
+    .shell.collapsed .menu-label,
+    .shell.collapsed .menu-list { display:none; }
+    .icon-btn { width:32px; height:32px; padding:0; display:inline-flex; align-items:center; justify-content:center; background:transparent; color:#344054; border:0; border-radius:8px; }
+    .icon-btn:hover { background:#f2f4f7; }
+    #menu-toggle { display:none; }
+    .title-row { min-height:40px; display:flex; align-items:center; }
+    .menu-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .menu-head strong { font-size:16px; }
+    .menu-label { margin:4px 2px 0; color:var(--muted); font-size:13px; }
+    .menu-list { display:flex; flex-direction:column; gap:10px; }
+    .menu-btn { width:100%; text-align:left; background:#eef3f8; color:#243140; border-radius:10px; padding:11px 12px; }
+    .menu-btn.active { background:#d9e8f6; color:#0f4c81; }
+    main { flex:1; min-width:0; padding:16px 28px 40px; background:var(--bg); }
+        h1 { font-size:22px; margin:0; line-height:40px; font-weight:650; }
+    h2 { font-size:18px; margin:0 0 14px; }
+    .roster { width:100%; border-collapse:collapse; }
+    .roster th { text-align:left; font-size:13px; color:var(--muted); font-weight:600; padding:8px 8px; border-bottom:1px solid var(--line); }
+    .roster { table-layout:auto; }
+    .roster th, .roster td { white-space:nowrap; }
+    .roster td.meta, .roster th.scope { white-space:normal; word-break:break-word; min-width:180px; }
+    .roster td { padding:12px 8px; border-bottom:1px solid var(--line); vertical-align:middle; }
+    .roster td .row { flex-wrap:nowrap; margin-top:0; }
+    .linkish { background:transparent; color:#1769aa; padding:0; }
+    .container-names { margin-top:6px; white-space:normal; word-break:break-word; }
+    .container-names.hidden { display:none; }
+    .user-tools { display:flex; gap:8px; align-items:center; margin-bottom:14px; }
+    .user-tools input { max-width:280px; }
+    .pill { display:inline-block; border:1px solid #d7e0ea; border-radius:99px; padding:1px 8px; margin:2px 4px 2px 0; font-size:12px; background:#fff; }
+    .status-ok { color:#1b5e20; }
+    .icon-link { background:transparent; color:#52606d; padding:4px 6px; }
+    #user-form { margin-top:14px; }
+    .tag { display:inline-block; background:#eef3f8; color:#243140; border-radius:99px; padding:2px 8px; margin:0 6px 0 0; font-size:12px; }
+    .role { color:#1769aa; font-size:13px; }
+    .section-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .section-head h2 { margin:0; }
+    p.lead { margin:0; color:var(--muted); }
+    .content { margin-top:18px; display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,1fr); gap:18px; align-items:start; }
+    .content.alerts-hidden { grid-template-columns:minmax(0,1fr) 48px; }
+    .content.alerts-hidden #alert-pane { overflow:hidden; padding:12px 6px; }
+    .content.alerts-hidden #alert-pane .filters,
+    .content.alerts-hidden #alert-pane #alerts,
+    .content.alerts-hidden #alert-pane h2 { display:none; }
+    .content.alerts-hidden #alert-pane .section-head { justify-content:center; }
+    .filters { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px; margin-bottom:8px; }
+    .filters input { padding:7px 8px; }
+    .panel, section { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; min-width:0; }
+    .panel { margin-top:18px; }
+    .panel.hidden, #main-content.hidden { display:none; }
+    label { display:block; font-size:13px; color:var(--muted); margin:12px 0 6px; }
+    input, textarea, select { width:100%; border:1px solid var(--line); border-radius:8px; padding:9px 10px; font:inherit; background:#fff; }
+    textarea { min-height:88px; resize:vertical; }
+    .row { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+    button { border:0; background:var(--accent); color:#fff; border-radius:8px; padding:9px 14px; font:inherit; cursor:pointer; }
+    button.ghost { background:#eef2f5; color:var(--ink); }
+    button.warn { background:#fde8e8; color:#9b1c1c; }
+    .check { display:flex; gap:8px; align-items:center; color:var(--ink); font-size:14px; margin-top:12px; }
+    .check input { width:auto; }
+    .rule, .alert { border-top:1px solid var(--line); padding:12px 0; }
+    .meta { color:var(--muted); font-size:13px; line-height:1.5; }
+    .state { display:inline-block; border-radius:99px; padding:2px 8px; background:#e8f5e9; color:#1b5e20; font-size:12px; }
+    .state.paused, .state.reconnecting { background:#fff4e5; color:#8a4b08; }
+    .state.stopped { background:#eef2f5; color:#52606d; }
+    .hits { cursor:help; border-bottom:1px dashed #b7c0c8; }
+    .bad { color:#9b1c1c; }
+    .ok { color:#1b5e20; }
+    pre { white-space:pre-wrap; margin:8px 0 0; font-family:inherit; font-size:13px; }
+
+    body:not(.authed) .shell { display:none; }
+    body.authed .login-screen { display:none; }
+    .login-screen { min-height:100vh; display:flex; align-items:center; justify-content:center; }
+    .login-card, .people { width:min(420px, calc(100% - 32px)); background:#fff; border:1px solid var(--line); border-radius:14px; padding:22px; }
+    .login-card h2, .people h2 { margin-top:0; }
+    .who { margin-left:auto; display:flex; align-items:center; gap:8px; color:var(--muted); }
+        .person { border-top:1px solid var(--line); padding:10px 0; }
+    @media (max-width:900px) {
+      .sidebar, .sidebar-inner { width:min(var(--menu), 92vw); }
+      main { padding:20px 16px 32px; }
+      .content { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+<div class="login-screen">
+  <form class="login-card" id="login-form">
+    <h2>登录</h2>
+    <label>登录名</label>
+    <input id="login-user" autocomplete="username">
+    <label>密码</label>
+    <input id="login-password" type="password" autocomplete="current-password">
+    <div class="row"><button type="submit">登录</button></div>
+    <p id="login-error" class="bad"></p>
+  </form>
+</div>
+<div id="shell" class="shell">
+  <aside class="sidebar">
+    <div class="sidebar-inner">
+      <div class="side-head">
+        <strong>菜单</strong>
+        <button id="hide-menu" class="icon-btn" type="button" title="收起侧栏"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
+      </div>
+            <div id="menu-list" class="menu-list"></div>
+    </div>
+  </aside>
+  <main>
+    <div class="top">
+      <div class="title-row">
+        
+        <h1 id="page-title">日志告警</h1>
+        <div class="who"><span id="who"></span><button id="logout" class="ghost" type="button">退出</button></div>
+      </div>
+    </div>
+    
+    <div id="editor" class="panel hidden">
+      <h2 id="form-title">新建项目</h2>
+      <input type="hidden" id="rule-id">
+      <label>项目名</label>
+      <input id="name" placeholder="例如 支付服务">
+      <label>日志源</label>
+      <select id="source-id"></select>
+      <label>命名空间</label>
+      <input id="namespace" placeholder="例如 jzai">
+      <label>容器，多个用逗号或换行。留空表示整个命名空间</label>
+      <textarea id="containers" placeholder="ai-pay-app"></textarea>
+      <div class="row"><button id="find-containers" class="ghost" type="button">从日志源检索容器</button></div>
+      <div id="container-picker" class="meta"></div>
+      <label>关键字，多个用逗号或换行</label>
+      <textarea id="keywords" placeholder="支付失败"></textarea>
+      <label>Webhook 地址</label>
+      <select id="webhook-id"><option value="">使用默认地址</option></select>
+      <label>同一实例重复告警的间隔（秒）</label>
+      <input id="cooldown" type="number" min="30" value="300">
+      <label class="check"><input id="enabled" type="checkbox" checked> 启用</label>
+      <div class="row">
+        <button id="save" type="button">保存</button>
+        <button id="reset" class="ghost" type="button">清空</button>
+        <button id="test" class="ghost" type="button">发一条测试消息</button>
+      </div>
+      <p id="form-error" class="bad"></p>
+    </div>
+    
+    <section id="people" class="panel hidden">
+      <div class="user-tools">
+        <input id="user-search" placeholder="搜索用户名或显示名">
+        <button id="open-add-user" type="button">新增</button>
+        <button id="open-my-password" class="ghost" type="button">修改我的密码</button>
+      </div>
+      <div id="user-list"></div>
+      <p id="user-count" class="meta"></p>
+      <div id="my-password" class="panel hidden">
+        <h2>修改我的密码</h2>
+        <label>原密码</label>
+        <input id="old-password" type="password" autocomplete="current-password">
+        <label>新密码</label>
+        <input id="my-new-password" type="password" autocomplete="new-password">
+        <div class="row"><button id="change-password" type="button">保存新密码</button></div>
+        <p id="password-error" class="bad"></p>
+      </div>
+      <div id="user-form" class="panel hidden">
+        <h2 id="user-form-title">新增用户</h2>
+        <input type="hidden" id="edit-user-id">
+        <label>用户名</label>
+        <input id="new-username" placeholder="登录名">
+        <label>显示名</label>
+        <input id="new-display">
+        <label id="password-label">初始密码</label>
+        <input id="new-password" type="password">
+        <label class="check"><input id="new-admin" type="checkbox"> 管理员</label>
+        <label>项目权限</label>
+        <div id="new-projects"></div>
+        <div class="row"><button id="create-user" type="button">保存</button><button id="cancel-user" class="ghost" type="button">取消</button></div>
+        <p id="people-error" class="bad"></p>
+      </div>
+    </section>
+<section id="sources" class="panel hidden">
+      <div class="user-tools">
+        <button id="open-add-source" type="button">新增日志源</button>
+      </div>
+      <div id="source-list"></div>
+      <div id="source-form" class="panel hidden">
+        <h2 id="source-form-title">新增日志源</h2>
+        <input type="hidden" id="edit-source-id">
+        <label>名称</label>
+        <input id="source-name" placeholder="例如 生产日志">
+        <label>地址</label>
+        <input id="source-url" placeholder="http://172.16.33.138:9428">
+        <label>AccountID</label>
+        <input id="source-account" value="1">
+        <label>ProjectID</label>
+        <input id="source-project" value="1">
+        <div class="row"><button id="save-source" type="button">保存</button><button id="cancel-source" class="ghost" type="button">取消</button></div>
+        <p id="source-error" class="bad"></p>
+      </div>
+    </section>
+<section id="hooks" class="panel hidden">
+      <div class="user-tools"><strong>Webhook 地址</strong><button id="open-add-hook" type="button">新增</button></div>
+      <div id="hook-list"></div>
+      <div id="hook-form" class="panel hidden">
+        <h2 id="hook-form-title">新增 Webhook</h2>
+        <input type="hidden" id="edit-hook-id">
+        <label>名称</label>
+        <input id="hook-name" placeholder="例如 剧梦告警群">
+        <label>Webhook 地址</label>
+        <input id="hook-url" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/...">
+        <div class="row"><button id="save-hook" type="button">保存</button><button id="cancel-hook" class="ghost" type="button">取消</button></div>
+        <p id="hook-error" class="bad"></p>
+      </div>
+    </section>
+<div id="grant-panel" class="panel hidden">
+      <h2 id="grant-title">授权</h2>
+      <div id="grant-users"></div>
+      <div class="row"><button id="grant-save" type="button">保存授权</button><button id="grant-cancel" class="ghost" type="button">取消</button></div>
+      <p id="grant-error" class="bad"></p>
+    </div>
+    <div id="main-content" class="content">
+      <section>
+        <div class="section-head"><h2>正在监控的项目</h2><button id="new-project" class="ghost" type="button">新建项目</button></div>
+        <div id="rules" class="meta">正在读取…</div>
+      </section>
+      <section id="alert-pane">
+        <div class="section-head"><h2>最近告警</h2><button id="hide-alerts" class="icon-btn" type="button" title="隐藏到右侧"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M15 4v16"/></svg></button></div>
+        <div class="filters">
+          <select id="filter-project"><option value="">选择项目</option></select>
+          <select id="filter-container" disabled><option value="">全部容器</option></select>
+          <select id="filter-keyword" disabled><option value="">全部关键字</option></select>
+        </div>
+        <div id="alerts" class="meta">正在读取…</div>
+      </section>
+    </div>
+    </main>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+
+let currentUser = null;
+async function boot() {
+  const response = await fetch("/api/me");
+  if (!response.ok) {
+    document.body.classList.remove("authed");
+    return;
+  }
+  currentUser = await response.json();
+  document.body.classList.add("authed");
+  $("who").textContent = currentUser.display_name + (currentUser.is_admin ? " · 管理员" : "");
+    refresh();
+}
+$("login-form").onsubmit = async (event) => {
+  event.preventDefault();
+  $("login-error").textContent = "";
+  const response = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: $("login-user").value.trim(), password: $("login-password").value })
+  });
+  const result = await response.json();
+  if (!response.ok) { $("login-error").textContent = result.error || "登录失败"; return; }
+  boot();
+};
+function setAlerts(open) {
+  $("main-content").classList.toggle("alerts-hidden", !open);
+  $("hide-alerts").title = open ? "隐藏到右侧" : "展开告警";
+  localStorage.setItem("vmlog-alerts-open", open ? "1" : "0");
+}
+document.addEventListener("click", (event) => {
+  if (event.target.closest("#hide-alerts")) setAlerts($("main-content").classList.contains("alerts-hidden"));
+  const toggle = event.target.closest("[data-toggle-containers]");
+  if (toggle) {
+    const names = toggle.parentElement.querySelector(".container-names");
+    if (names) names.classList.toggle("hidden");
+  }
+});
+if (localStorage.getItem("vmlog-alerts-open") === "0") setAlerts(false);
+boot();
+if ($("change-password")) $("change-password").onclick = async () => {
+  $("password-error").textContent = "";
+  const response = await fetch("/api/me/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ old_password: $("old-password").value, new_password: $("my-new-password").value })
+  });
+  const result = await response.json();
+  $("password-error").textContent = response.ok ? "密码已修改" : (result.error || "修改失败");
+  if (response.ok) { $("old-password").value = ""; $("my-new-password").value = ""; }
+};
+$("logout").onclick = async () => {
+  await fetch("/api/logout", { method: "POST" });
+  currentUser = null;
+  document.body.classList.remove("authed");
+};
+
+let grantRuleId = "";
+async function openGrant(ruleId) {
+  grantRuleId = ruleId;
+  const rule = rulesCache.find(item => item.id === ruleId);
+  const data = await (await fetch("/api/users")).json();
+  $("grant-title").textContent = "授权 · " + (rule ? rule.name : "");
+  $("grant-users").innerHTML = (data.users || []).filter(user => !user.is_admin).map(user =>
+    `<label class="check"><input type="checkbox" value="${escapeHtml(user.id)}" ${user.rule_ids.includes(ruleId) ? "checked" : ""}> ${escapeHtml(user.display_name)} <span class="meta">${escapeHtml(user.username)}</span></label>`
+  ).join("") || "除管理员外还没有可授权的用户。管理员默认可管理全部项目。";
+  $("grant-error").textContent = "";
+  $("grant-panel").classList.remove("hidden");
+}
+let peopleData = { users: [], rules: [] };
+function userProjects(user) {
+  if (user.is_admin) return ["全部项目"];
+  return user.rule_ids.map(id => (peopleData.rules.find(rule => rule.id === id) || {}).name).filter(Boolean);
+}
+function renderUserTable() {
+  const query = ($("user-search").value || "").trim().toLowerCase();
+  const users = peopleData.users.filter(user => !query || user.username.toLowerCase().includes(query) || user.display_name.toLowerCase().includes(query));
+  const rows = users.map(user => {
+    const tags = userProjects(user).map(name => `<span class="pill">${escapeHtml(name)}</span>`).join("") || '<span class="meta">未分配</span>';
+    return `<tr>
+      <td>${escapeHtml(user.username)}</td>
+      <td>${escapeHtml(user.display_name)}</td>
+      <td>${user.is_admin ? "管理员" : "项目成员"}</td>
+      <td>${tags}</td>
+      <td class="${user.enabled ? "status-ok" : ""}">${user.enabled ? "正常" : "已停用"}</td>
+      <td>
+        <button class="ghost icon-link" data-edit-user="${user.id}">编辑</button>
+        <button class="ghost icon-link" data-reset-user="${user.id}">重置密码</button>
+        <button class="warn icon-link" data-remove-user="${user.id}">删除</button>
+      </td>
+    </tr>`;
+  }).join("");
+  $("user-list").innerHTML = `<table class="roster"><thead><tr><th>用户名</th><th>显示名</th><th>角色</th><th>项目权限</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="6">没有匹配的用户</td></tr>'}</tbody></table>`;
+  $("user-count").textContent = "共 " + users.length + " 条";
+  $("user-list").querySelectorAll("[data-edit-user]").forEach(btn => btn.onclick = () => openUserForm(peopleData.users.find(user => user.id === btn.dataset.editUser)));
+  $("user-list").querySelectorAll("[data-reset-user]").forEach(btn => btn.onclick = async () => {
+    const password = prompt("输入新密码，至少 6 位");
+    if (!password) return;
+    const response = await fetch("/api/users/" + btn.dataset.resetUser + "/password", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password })
+    });
+    const result = await response.json();
+    $("people-error").textContent = response.ok ? "密码已重置" : (result.error || "重置失败");
+  });
+  $("user-list").querySelectorAll("[data-remove-user]").forEach(btn => btn.onclick = async () => {
+    if (!confirm("删除这个用户？")) return;
+    const response = await fetch("/api/users/" + btn.dataset.removeUser, { method: "DELETE" });
+    const result = await response.json();
+    if (!response.ok) { $("people-error").textContent = result.error || "删除失败"; return; }
+    loadPeople();
+  });
+}
+function openUserForm(user) {
+  $("user-form").classList.remove("hidden");
+  $("user-form-title").textContent = user ? "编辑用户" : "新增用户";
+  $("edit-user-id").value = user ? user.id : "";
+  $("new-username").value = user ? user.username : "";
+  $("new-username").disabled = !!user;
+  $("new-display").value = user ? user.display_name : "";
+  $("new-password").value = "";
+  $("password-label").textContent = user ? "重置密码，留空则不修改" : "初始密码";
+  $("new-admin").checked = !!(user && user.is_admin);
+  $("new-projects").innerHTML = peopleData.rules.map(rule =>
+    `<label class="check"><input type="checkbox" value="${escapeHtml(rule.id)}" ${user && user.rule_ids.includes(rule.id) ? "checked" : ""}> ${escapeHtml(rule.name)}</label>`
+  ).join("") || "还没有项目";
+  $("people-error").textContent = "";
+}
+
+let sourceCache = [];
+
+let hookCache = [];
+async function loadHooks() {
+  hookCache = await (await fetch("/api/webhooks")).json();
+  fillHookOptions();
+  const rows = hookCache.map(item => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.hook_url)}</td><td><button class="ghost icon-link" data-edit-hook="${item.id}">编辑</button><button class="warn icon-link" data-remove-hook="${item.id}">删除</button></td></tr>`).join("");
+  if (!$("hook-list")) return;
+  $("hook-list").innerHTML = `<table class="roster"><thead><tr><th>名称</th><th>地址</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="3">还没有 Webhook 地址</td></tr>'}</tbody></table>`;
+  $("hook-list").querySelectorAll("[data-edit-hook]").forEach(btn => btn.onclick = () => openHookForm(hookCache.find(item => item.id === btn.dataset.editHook)));
+  $("hook-list").querySelectorAll("[data-remove-hook]").forEach(btn => btn.onclick = async () => {
+    if (!confirm("删除这个 Webhook？")) return;
+    const response = await fetch("/api/webhooks/" + btn.dataset.removeHook, { method: "DELETE" });
+    const result = await response.json();
+    $("hook-error").textContent = response.ok ? "" : (result.error || "删除失败");
+    if (response.ok) loadHooks();
+  });
+}
+function fillHookOptions() {
+  const select = $("webhook-id");
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = '<option value="">使用默认地址</option>' + hookCache.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
+  if (hookCache.some(item => item.id === current)) select.value = current;
+}
+function openHookForm(item) {
+  $("hook-form").classList.remove("hidden");
+  $("hook-form-title").textContent = item ? "编辑 Webhook" : "新增 Webhook";
+  $("edit-hook-id").value = item ? item.id : "";
+  $("hook-name").value = item ? item.name : "";
+  $("hook-url").value = item ? item.hook_url : "";
+  $("hook-error").textContent = "";
+}
+async function loadSources() {
+  sourceCache = await (await fetch("/api/sources")).json();
+  const rows = sourceCache.map(source => `<tr>
+      <td>${escapeHtml(source.name)}</td>
+      <td>${escapeHtml(source.base_url)}</td>
+      <td>${escapeHtml(source.account_id)} / ${escapeHtml(source.project_id)}</td>
+      <td><button class="ghost icon-link" data-edit-source="${source.id}">编辑</button><button class="warn icon-link" data-remove-source="${source.id}">删除</button></td>
+    </tr>`).join("");
+  $("source-list").innerHTML = `<table class="roster"><thead><tr><th>名称</th><th>地址</th><th>租户</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="4">还没有日志源</td></tr>'}</tbody></table>`;
+  fillSourceOptions();
+  $("source-list").querySelectorAll("[data-edit-source]").forEach(btn => btn.onclick = () => openSourceForm(sourceCache.find(item => item.id === btn.dataset.editSource)));
+  $("source-list").querySelectorAll("[data-remove-source]").forEach(btn => btn.onclick = async () => {
+    if (!confirm("删除这个日志源？")) return;
+    const response = await fetch("/api/sources/" + btn.dataset.removeSource, { method: "DELETE" });
+    const result = await response.json();
+    $("source-error").textContent = response.ok ? "" : (result.error || "删除失败");
+    if (response.ok) loadSources();
+  });
+}
+function fillSourceOptions() {
+  const select = $("source-id");
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = sourceCache.map(source => `<option value="${escapeHtml(source.id)}">${escapeHtml(source.name)}</option>`).join("");
+  if (sourceCache.some(source => source.id === current)) select.value = current;
+}
+function openSourceForm(source) {
+  $("source-form").classList.remove("hidden");
+  $("source-form-title").textContent = source ? "编辑日志源" : "新增日志源";
+  $("edit-source-id").value = source ? source.id : "";
+  $("source-name").value = source ? source.name : "";
+  $("source-url").value = source ? source.base_url : "";
+  $("source-account").value = source ? source.account_id : "1";
+  $("source-project").value = source ? source.project_id : "1";
+  $("source-error").textContent = "";
+}
+async function loadPeople() {
+  const data = await (await fetch("/api/users")).json();
+  peopleData = { users: data.users || [], rules: data.rules || [] };
+  renderUserTable();
+}
+$("user-search").addEventListener("input", renderUserTable);
+$("open-add-user").onclick = () => openUserForm(null);
+$("open-my-password").onclick = () => $("my-password").classList.toggle("hidden");
+$("cancel-user").onclick = () => $("user-form").classList.add("hidden");
+
+$("create-user").onclick = async () => {
+  $("people-error").textContent = "";
+  const editId = $("edit-user-id").value;
+  const rule_ids = [...$("new-projects").querySelectorAll("input:checked")].map(item => item.value);
+  const payload = {
+    username: $("new-username").value.trim(),
+    display_name: $("new-display").value.trim(),
+    password: $("new-password").value,
+    is_admin: $("new-admin").checked,
+    enabled: true,
+    rule_ids
+  };
+  const response = await fetch(editId ? "/api/users/" + editId : "/api/users", {
+    method: editId ? "PUT" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const result = await response.json();
+  if (!response.ok) { $("people-error").textContent = result.error || "保存失败"; return; }
+  if (editId && payload.password) {
+    const reset = await fetch("/api/users/" + editId + "/password", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: payload.password })
+    });
+    if (!reset.ok) { const err = await reset.json(); $("people-error").textContent = err.error || "密码重置失败"; return; }
+  }
+  $("user-form").classList.add("hidden");
+  loadPeople();
+};
+const shell = $("shell");
+const stateText = { running:"监控中", paused:"已暂停", reconnecting:"正在重连", starting:"启动中", stopped:"未启用" };
+let rulesCache = [];
+function lines(value) { return value.split(/[\n,，]+/).map(s => s.trim()).filter(Boolean); }
+function setMenu(open) {
+  shell.classList.toggle("collapsed", !open);
+  $("hide-menu").title = open ? "收起侧栏" : "展开侧栏";
+}
+function showEditor() { $("editor").classList.remove("hidden"); }
+function fill(rule) {
+  $("form-title").textContent = rule ? "修改项目" : "新建项目";
+  $("rule-id").value = rule ? rule.id : "";
+  $("name").value = rule ? rule.name : "";
+  $("source-id").value = rule && rule.source_id ? rule.source_id : ($("source-id").value || "");
+  $("namespace").value = rule ? rule.namespace : "";
+  $("containers").value = rule ? (rule.containers || []).join("\n") : "";
+  $("keywords").value = rule ? (rule.keywords || []).join("\n") : "";
+  $("cooldown").value = rule ? rule.cooldown_sec : 300;
+  $("webhook-id").value = rule && rule.webhook_id ? rule.webhook_id : "";
+  $("enabled").checked = rule ? !!rule.enabled : true;
+  $("form-error").textContent = "";
+  showEditor();
+  renderMenu();
+}
+function selectProject(rule) {
+  fill(rule);
+  filtersReady = true;
+  forcedRuleId = rule.id;
+  renderFilters();
+  renderAlerts();
+}
+
+function hitTip(hits) {
+  const rows = Object.entries(hits || {}).filter(([, count]) => count > 0).sort((a, b) => b[1] - a[1]);
+  if (!rows.length) return "暂无分容器统计。新产生的命中会按容器累计。";
+  return rows.map(([name, count]) => name + "：" + count + " 次").join("\n");
+}
+function showOnly(panel) {
+  $("editor").classList.toggle("hidden", panel !== "editor");
+  $("people").classList.toggle("hidden", panel !== "people");
+  const titles = { people: "用户管理", sources: "日志源管理", hooks: "告警管理" };
+  $("page-title").textContent = titles[panel] || "项目管理";
+  $("main-content").classList.toggle("hidden", panel === "people" || panel === "sources" || panel === "hooks");
+  $("sources").classList.toggle("hidden", panel !== "sources");
+  $("hooks").classList.toggle("hidden", panel !== "hooks");
+  if ($("new-project")) $("new-project").hidden = !(currentUser && currentUser.is_admin);
+}
+function renderMenu() {
+  const usersOpen = !$("people").classList.contains("hidden");
+  const items = [{ id: "projects", name: "项目管理", kind: "projects" }];
+  if (currentUser && currentUser.is_admin) {
+    items.push({ id: "sources", name: "日志源管理", kind: "sources" });
+    items.push({ id: "hooks", name: "告警管理", kind: "hooks" });
+    items.push({ id: "users", name: "用户管理", kind: "users" });
+  }
+  $("menu-list").innerHTML = items.map(item => {
+    const openKind = !$("people").classList.contains("hidden") ? "users" : !$("sources").classList.contains("hidden") ? "sources" : !$("hooks").classList.contains("hidden") ? "hooks" : "projects";
+    const active = item.kind === openKind;
+    return `<button class="menu-btn${active ? " active" : ""}" type="button" data-menu="${item.kind}">${escapeHtml(item.name)}</button>`;
+  }).join("");
+  $("menu-list").querySelectorAll("[data-menu]").forEach(btn => btn.onclick = () => {
+    if (btn.dataset.menu === "users") { showOnly("people"); loadPeople(); renderMenu(); }
+    else if (btn.dataset.menu === "sources") { showOnly("sources"); loadSources(); renderMenu(); }
+    else if (btn.dataset.menu === "hooks") { showOnly("hooks"); loadHooks(); renderMenu(); }
+    else { showOnly("projects"); renderMenu(); }
+  });
+  if ($("new-project")) $("new-project").hidden = !(currentUser && currentUser.is_admin);
+}
+
+function projectRow(rule) {
+  const runtime = rule.runtime || {};
+  const state = rule.paused ? "paused" : (runtime.state || "stopped");
+  const admin = currentUser && currentUser.is_admin
+    ? "<button class=\"ghost\" data-grant=\"" + rule.id + "\">授权</button><button class=\"warn\" data-del=\"" + rule.id + "\">删除</button>"
+    : "";
+  const pause = rule.paused ? "继续" : "暂停";
+  const containers = rule.containers || [];
+  const containerText = containers.length
+    ? "<button type=\"button\" class=\"linkish\" data-toggle-containers>" + containers.length + " 个容器</button><div class=\"container-names hidden\">" + escapeHtml(containers.join("、")) + "</div>"
+    : "全部容器";
+  const scope = escapeHtml(rule.source_name || "未选日志源") + "<br>" + escapeHtml(rule.namespace) + " / " + containerText;
+  const words = escapeHtml((rule.keywords || []).join("、"));
+  return "<tr><td><strong>" + escapeHtml(rule.name) + "</strong></td><td><span class=\"state " + state + "\">" + (stateText[state] || state) + "</span></td><td class=\"meta\">" + scope + "<br>关键字：" + words + "</td><td><div class=\"row\"><button class=\"ghost\" data-edit=\"" + rule.id + "\">修改</button><button class=\"ghost\" data-pause=\"" + rule.id + "\">" + pause + "</button>" + admin + "</div></td></tr>";
+}
+async function refresh() {
+  try {
+  const response = await fetch("/api/status");
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "读取失败");
+  rulesCache = data.rules || [];
+  if (currentUser && currentUser.is_admin) {
+    const sources = await fetch("/api/sources");
+    if (sources.ok) { sourceCache = await sources.json(); fillSourceOptions(); }
+  }
+  const hooks = await fetch("/api/webhooks");
+  if (hooks.ok) { hookCache = await hooks.json(); fillHookOptions(); }
+  if (!(currentUser && currentUser.is_admin) && rulesCache[0]) {
+    sourceCache = rulesCache.filter((rule, index, list) => list.findIndex(item => item.source_id === rule.source_id) === index).map(rule => ({ id: rule.source_id, name: rule.source_name || "日志源", base_url: rule.source_url }));
+    fillSourceOptions();
+  }
+  renderMenu();
+  const rulesHtml = rulesCache.length ? rulesCache.map(projectRow).join("") : "<tr><td colspan=\"4\">还没有项目。点「新建项目」添加。</td></tr>";
+  const tableHtml = "<table class=\"roster\"><thead><tr><th>项目</th><th>状态</th><th>范围</th><th>操作</th></tr></thead><tbody>" + rulesHtml + "</tbody></table>";
+    if ($("rules").innerHTML !== tableHtml) $("rules").innerHTML = tableHtml;
+  $("rules").querySelectorAll("[data-pause]").forEach(btn => btn.onclick = async () => {
+    const rule = rulesCache.find(item => item.id === btn.dataset.pause);
+    await fetch("/api/rules/" + btn.dataset.pause + "/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused: !(rule && rule.paused) })
+    });
+    refresh();
+  });
+  $("rules").querySelectorAll("[data-view]").forEach(btn => btn.onclick = () => {
+    const rule = rulesCache.find(item => item.id === btn.dataset.view);
+    if (!rule) return;
+    setAlerts(true);
+    filtersReady = true;
+    forcedRuleId = rule.id;
+    renderFilters();
+    renderAlerts();
+  });
+  $("rules").querySelectorAll("[data-grant]").forEach(btn => btn.onclick = () => openGrant(btn.dataset.grant));
+  $("rules").querySelectorAll("[data-edit]").forEach(btn => btn.onclick = () => fill(rulesCache.find(rule => rule.id === btn.dataset.edit)));
+  $("rules").querySelectorAll("[data-del]").forEach(btn => btn.onclick = async () => {
+    if (!confirm("删除这个项目？")) return;
+    await fetch("/api/rules/" + btn.dataset.del, { method:"DELETE" });
+    if ($("rule-id").value === btn.dataset.del) $("editor").classList.add("hidden");
+    refresh();
+  });
+  renderFilters();
+  renderAlerts();
+  } catch (error) {
+    $("rules").textContent = "页面数据没有加载出来：" + error.message;
+  }
+}
+let alertsCache = [];
+function matchFilter(value, query) {
+  return !query || String(value || "").toLowerCase().includes(query);
+}
+function fillSelect(id, values, placeholder) {
+  const select = $(id);
+  const current = select.value;
+  const options = [`<option value="">${placeholder}</option>`].concat(
+    values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
+  );
+  select.innerHTML = options.join("");
+  select.value = values.includes(current) ? current : "";
+}
+let filtersReady = false;
+let forcedRuleId = "";
+function readSavedFilters() {
+  try { return JSON.parse(localStorage.getItem("vmlog-alert-filters") || "{}"); }
+  catch (error) { return {}; }
+}
+function saveFilters() {
+  localStorage.setItem("vmlog-alert-filters", JSON.stringify({
+    ruleId: $("filter-project").value,
+    container: $("filter-container").value,
+    keyword: $("filter-keyword").value
+  }));
+}
+function renderFilters() {
+  const saved = readSavedFilters();
+  const desired = filtersReady ? {
+    ruleId: forcedRuleId || $("filter-project").value,
+    container: forcedRuleId ? "" : $("filter-container").value,
+    keyword: forcedRuleId ? "" : $("filter-keyword").value
+  } : { ruleId: saved.ruleId || "", container: saved.container || "", keyword: saved.keyword || "" };
+  forcedRuleId = "";
+  const select = $("filter-project");
+  select.innerHTML = `<option value="">选择项目</option>` + rulesCache.map(rule =>
+    `<option value="${escapeHtml(rule.id)}">${escapeHtml(rule.name)}</option>`
+  ).join("");
+  select.value = rulesCache.some(rule => rule.id === desired.ruleId) ? desired.ruleId : "";
+  const selected = select.value;
+  const scoped = rulesCache.filter(rule => rule.id === selected);
+  const containers = [...new Set(scoped.flatMap(rule => rule.containers || []).filter(Boolean))];
+  const keywords = [...new Set(scoped.flatMap(rule => rule.keywords || []).filter(Boolean))];
+  fillSelect("filter-container", containers, "全部容器");
+  fillSelect("filter-keyword", keywords, "全部关键字");
+  if (containers.includes(desired.container)) $("filter-container").value = desired.container;
+  if (keywords.includes(desired.keyword)) $("filter-keyword").value = desired.keyword;
+  $("filter-container").disabled = !selected;
+  $("filter-keyword").disabled = !selected;
+  filtersReady = true;
+  saveFilters();
+}
+async function renderAlerts() {
+  const ruleId = $("filter-project").value;
+  const container = $("filter-container").value;
+  const keyword = $("filter-keyword").value;
+  const scrollY = window.scrollY;
+  if (!ruleId) {
+    $("alerts").innerHTML = "请先选择一个项目。每个项目的告警单独查看。";
+    window.scrollTo(0, scrollY);
+    return;
+  }
+  const params = new URLSearchParams({ rule_id: ruleId, container, keyword });
+  const alerts = await (await fetch("/api/alerts?" + params.toString())).json();
+  const html = alerts.length ? alerts.map(alert => `<div class="alert">
+    <strong>${escapeHtml(alert.project)}</strong>
+    <span class="${alert.delivered ? "ok" : "bad"}">${alert.delivered ? "已发到飞书" : "发送失败"}</span>
+    <div class="meta">${escapeHtml(alert.time)} · ${escapeHtml(alert.keyword)}${alert.container ? " · " + escapeHtml(alert.container) : ""}${alert.error ? `<br><span class="bad">${escapeHtml(alert.error)}</span>` : ""}</div>
+    <pre>${escapeHtml(alert.text || "")}</pre>
+  </div>`).join("") : "这个项目还没有符合条件的告警。";
+  if ($("alerts").innerHTML !== html) $("alerts").innerHTML = html;
+  window.scrollTo(0, scrollY);
+}
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[ch]));
+}
+$("filter-project").addEventListener("change", () => {
+  filtersReady = true;
+  forcedRuleId = $("filter-project").value;
+  renderFilters();
+  renderAlerts();
+});
+["filter-container","filter-keyword"].forEach(id => $(id).addEventListener("change", () => { saveFilters(); renderAlerts(); }));
+$("grant-cancel").onclick = () => $("grant-panel").classList.add("hidden");
+$("grant-save").onclick = async () => {
+  const user_ids = [...$("grant-users").querySelectorAll("input:checked")].map(item => item.value);
+  const response = await fetch("/api/rules/" + grantRuleId + "/members", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_ids })
+  });
+  const result = await response.json();
+  $("grant-error").textContent = response.ok ? "授权已保存" : (result.error || "保存失败");
+};
+$("open-add-hook").onclick = () => openHookForm(null);
+$("cancel-hook").onclick = () => $("hook-form").classList.add("hidden");
+$("save-hook").onclick = async () => {
+  const id = $("edit-hook-id").value;
+  const payload = { name: $("hook-name").value.trim(), url: $("hook-url").value.trim() };
+  const response = await fetch(id ? "/api/webhooks/" + id : "/api/webhooks", { method: id ? "PUT" : "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+  const result = await response.json();
+  if (!response.ok) { $("hook-error").textContent = result.error || "保存失败"; return; }
+  $("hook-form").classList.add("hidden");
+  loadHooks();
+  refresh();
+};
+$("open-add-source").onclick = () => openSourceForm(null);
+$("cancel-source").onclick = () => $("source-form").classList.add("hidden");
+$("save-source").onclick = async () => {
+  const id = $("edit-source-id").value;
+  const payload = { name: $("source-name").value.trim(), url: $("source-url").value.trim(), account_id: $("source-account").value.trim(), project_id: $("source-project").value.trim() };
+  const response = await fetch(id ? "/api/sources/" + id : "/api/sources", { method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const result = await response.json();
+  if (!response.ok) { $("source-error").textContent = result.error || "保存失败"; return; }
+  $("source-form").classList.add("hidden");
+  loadSources();
+  refresh();
+};
+$("new-project").onclick = () => { showOnly("editor"); fill(null); };
+$("hide-menu").onclick = () => setMenu(shell.classList.contains("collapsed"));
+$("reset").onclick = () => fill(null);
+
+$("find-containers").onclick = async () => {
+  $("container-picker").textContent = "正在检索…";
+  const params = new URLSearchParams({ source_id: $("source-id").value, namespace: $("namespace").value.trim() });
+  const response = await fetch("/api/containers?" + params.toString());
+  const result = await response.json();
+  if (!response.ok) { $("container-picker").textContent = result.error || "检索失败"; return; }
+  if (!result.length) { $("container-picker").textContent = "这个命名空间下最近 6 小时没有容器。"; return; }
+  const selected = new Set(lines($("containers").value));
+  $("container-picker").innerHTML = result.map(name => `<label class="check"><input type="checkbox" value="${escapeHtml(name)}" ${selected.has(name) ? "checked" : ""}> ${escapeHtml(name)}</label>`).join("")
+    + '<div class="row"><button id="import-containers" type="button">导入到项目</button></div>';
+  $("import-containers").onclick = () => {
+    const picked = [...$("container-picker").querySelectorAll("input")].map(item => item.value);
+    $("container-picker").querySelectorAll("input").forEach(item => { item.checked = true; });
+    const merged = [...new Set(lines($("containers").value).concat(picked))];
+    $("containers").value = merged.join("\n");
+    $("container-picker").insertAdjacentHTML("beforeend", `<div class="meta">已导入 ${picked.length} 个容器。再次检索时，这些容器会保持选中。保存项目后生效。</div>`);
+  };
+};
+$("save").onclick = async () => {
+  $("form-error").textContent = "";
+  const payload = {
+    name: $("name").value.trim(),
+    source_id: $("source-id").value,
+    namespace: $("namespace").value.trim(),
+    containers: lines($("containers").value),
+    keywords: lines($("keywords").value),
+    cooldown_sec: Number($("cooldown").value || 300),
+    webhook_id: $("webhook-id").value,
+    enabled: $("enabled").checked
+  };
+  const id = $("rule-id").value;
+  const response = await fetch(id ? "/api/rules/" + id : "/api/rules", {
+    method: id ? "PUT" : "POST",
+    headers: { "Content-Type":"application/json" },
+    body: JSON.stringify(payload)
+  });
+  const result = await response.json();
+  if (!response.ok) { $("form-error").textContent = result.error || "保存失败"; return; }
+  $("editor").classList.add("hidden");
+  refresh();
+};
+$("test").onclick = async () => {
+  $("form-error").textContent = "";
+  const response = await fetch("/api/test", {
+    method:"POST",
+    headers: { "Content-Type":"application/json" },
+    body: JSON.stringify({ webhook: ((hookCache.find(item => item.id === $("webhook-id").value) || {}).hook_url || "") })
+  });
+  const result = await response.json();
+  $("form-error").textContent = response.ok ? "测试消息已发送" : (result.error || "发送失败");
+};
+boot();
+setInterval(() => { if (currentUser) refresh(); }, 5000);
+</script>
+</body>
+</html>

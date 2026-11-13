@@ -1,0 +1,18 @@
+victorialogs:
+  url: http://127.0.0.1:9428
+  account_id: "1"
+  project_id: "1"
+feishu:
+  webhook: ""
+mysql:
+  host: 127.0.0.1
+  port: "3306"
+  user: ""
+  password: ""
+  database: vmlog_monitor
+server:
+  host: 127.0.0.1
+  port: "8791"
+auth:
+  admin_user: admin
+  admin_password: ""
