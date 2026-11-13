@@ -1,0 +1,15 @@
+victorialogs:
+  url: http://172.16.33.138:9428
+  account_id: "1"
+  project_id: "1"
+feishu:
+  webhook: https://open.feishu.cn/open-apis/bot/v2/hook/11868580-7d6f-4a8a-ac00-34f2d7321da3
+mysql:
+  host: 127.0.0.1
+  port: "3306"
+  user: adam
+  password: "Adamlv159@#"
+  database: vmlog_monitor
+server:
+  host: 127.0.0.1
+  port: "8791"

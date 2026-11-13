@@ -5,7 +5,7 @@ include/
 lib/
 lib64
 pyvenv.cfg
-config.yaml
+
 _out.txt
 _page.js
 _patch.py
