@@ -654,7 +654,8 @@ function projectRow(rule) {
     : "全部容器";
   const scope = escapeHtml(rule.source_name || "未选日志源") + "<br>" + escapeHtml(Array.isArray(rule.namespace) ? rule.namespace.join("、") : rule.namespace) + " / " + containerText;
   const words = escapeHtml((rule.keywords || []).join("、"));
-  return "<tr><td><strong>" + escapeHtml(rule.name) + "</strong></td><td><span class=\"state " + state + "\">" + (stateText[state] || state) + "</span></td><td class=\"meta\">" + scope + "<br>关键字：" + words + "</td><td><div class=\"row\"><button class=\"ghost\" data-edit=\"" + rule.id + "\">修改</button><button class=\"ghost\" data-pause=\"" + rule.id + "\">" + pause + "</button>" + admin + "</div></td></tr>";
+  const fault = state === "reconnecting" && runtime.last_error ? "<div class=\"meta\">" + escapeHtml(runtime.last_error) + "</div>" : "";
+  return "<tr><td><strong>" + escapeHtml(rule.name) + "</strong></td><td><span class=\"state " + state + "\">" + (stateText[state] || state) + "</span>" + fault + "</td><td class=\"meta\">" + scope + "<br>关键字：" + words + "</td><td><div class=\"row\"><button class=\"ghost\" data-edit=\"" + rule.id + "\">修改</button><button class=\"ghost\" data-pause=\"" + rule.id + "\">" + pause + "</button>" + admin + "</div></td></tr>";
 }
 async function refresh() {
   try {

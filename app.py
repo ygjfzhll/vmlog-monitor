@@ -1101,6 +1101,12 @@ class TailWorker(threading.Thread):
             except Exception as exc:
                 if self.stop_event.is_set():
                     break
+                if self._source_alive():
+                    self.reconnect = False
+                    self._set(state="running", last_error="")
+                    self.stop_event.wait(1)
+                    delay = 2
+                    continue
                 self.reconnect = True
                 self._set(state="reconnecting", last_error=str(exc)[:240])
                 self.stop_event.wait(delay)
@@ -1158,9 +1164,6 @@ class TailWorker(threading.Thread):
             "refresh_interval": "1s",
             "offset": "2s",
         }
-        if self.reconnect:
-            gap = max(30, int(time.time() - self.last_wall) + 15)
-            payload["start_offset"] = f"{min(gap, 1800)}s"
         form = urllib.parse.urlencode(payload).encode()
         request = urllib.request.Request(
             url,
@@ -1179,9 +1182,23 @@ class TailWorker(threading.Thread):
                 except socket.timeout:
                     continue
                 if not line:
-                    raise ConnectionError("实时连接已断开")
+                    return
                 self.last_wall = time.time()
                 self._handle_line(line)
+
+    def _source_alive(self):
+        logs = {
+            "url": self.rule.get("source_url") or self.monitor.config["victorialogs"].get("url", ""),
+            "account_id": self.rule.get("account_id") or self.monitor.config["victorialogs"].get("account_id", "1"),
+            "project_id": self.rule.get("project_id") or self.monitor.config["victorialogs"].get("project_id", "1"),
+        }
+        url = logs["url"].rstrip("/") + "/health"
+        request = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return 200 <= getattr(response, "status", 200) < 300
+        except Exception:
+            return False
 
     def _handle_line(self, line):
         try:
