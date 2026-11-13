@@ -28,13 +28,18 @@
     .menu-list { display:flex; flex-direction:column; gap:10px; }
     .menu-btn { width:100%; text-align:left; background:#eef3f8; color:#243140; border-radius:10px; padding:11px 12px; }
     .menu-btn.active { background:#d9e8f6; color:#0f4c81; }
-    main { flex:1; min-width:0; padding:16px 28px 40px; background:var(--bg); }
+    main { flex:1; min-width:0; min-height:100vh; padding:16px 28px 28px; background:var(--bg); display:flex; flex-direction:column; }
     .home-head { display:flex; justify-content:flex-end; margin-bottom:12px; }
     .home-head select, .home-head input { width:180px; }
     .home-head { gap:8px; align-items:center; }
     .stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; margin-bottom:16px; }
     .stat { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
     .num { font-size:32px; font-weight:650; margin:4px 0; }
+    .hover-stat { position:relative; }
+    .hover-card { display:none; position:absolute; left:0; top:calc(100% - 8px); z-index:6; width:min(420px,70vw); max-height:320px; overflow:auto; background:#fff; border:1px solid var(--line); border-radius:12px; box-shadow:0 8px 24px rgba(15,23,32,.12); padding:10px 12px; }
+    .hover-stat:hover .hover-card { display:block; }
+    .tip-item { padding:8px 0; border-bottom:1px solid var(--line); }
+    #home { flex:1; min-height:0; display:flex; flex-direction:column; }
     #home.hidden, #page-head.hidden { display:none; }
         h1 { font-size:22px; margin:0; line-height:40px; font-weight:650; }
     h2 { font-size:18px; margin:0 0 14px; }
@@ -59,13 +64,23 @@
     .section-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
     .section-head h2 { margin:0; }
     p.lead { margin:0; color:var(--muted); }
-    .content { margin-top:18px; display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,1fr); gap:18px; align-items:start; }
-    .content.alerts-hidden { grid-template-columns:minmax(0,1fr) 48px; }
-    .content.alerts-hidden #alert-pane { overflow:hidden; padding:12px 6px; }
-    .content.alerts-hidden #alert-pane .filters,
-    .content.alerts-hidden #alert-pane #alerts,
-    .content.alerts-hidden #alert-pane h2 { display:none; }
-    .content.alerts-hidden #alert-pane .section-head { justify-content:center; }
+    .content { margin-top:18px; display:block; }
+    #alert-pane { margin-top:16px; flex:1; min-height:0; display:flex; flex-direction:column; }
+    #alerts { flex:1; min-height:0; display:flex; flex-direction:column; }
+    .marquee { flex:1; min-height:0; overflow:hidden; }
+    .marquee-track { animation: marquee-up linear infinite; }
+    .marquee:hover .marquee-track { animation-play-state:paused; }
+    @keyframes marquee-up { from { transform:translateY(0); } to { transform:translateY(-50%); } }
+    .ticker-row { display:grid; grid-template-columns:140px 88px 180px minmax(0,1fr); gap:12px; align-items:center; height:36px; border-top:1px solid var(--line); font-size:14px; }
+    .ticker-row span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .ticker-row .ticker-msg { color:#243140; }
+    .ticker-row { cursor:pointer; }
+    .ticker-row:hover { background:#f4f8fb; }
+    .log-mask { position:fixed; inset:0; background:rgba(15,23,32,.35); z-index:20; display:flex; align-items:center; justify-content:center; padding:24px; }
+    .log-mask.hidden { display:none; }
+    .log-dialog { width:min(860px, 100%); max-height:min(80vh, 720px); overflow:auto; background:#fff; border-radius:14px; padding:18px 20px 20px; box-shadow:0 16px 40px rgba(15,23,32,.18); }
+    .log-dialog pre { white-space:pre-wrap; word-break:break-word; margin:12px 0 0; font:13px/1.6 ui-monospace, Consolas, monospace; }
+    .ticker-row .bad { color:#a12626; }
     .filters { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px; margin-bottom:8px; }
     .filters input { padding:7px 8px; }
     .panel, section { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; min-width:0; }
@@ -116,6 +131,13 @@
     <p id="login-error" class="bad"></p>
   </form>
 </div>
+<div id="log-mask" class="log-mask hidden">
+  <div class="log-dialog" role="dialog">
+    <div class="section-head"><h2 id="log-title">告警详情</h2><button id="log-close" class="ghost" type="button">关闭</button></div>
+    <div id="log-meta" class="meta"></div>
+    <pre id="log-body"></pre>
+  </div>
+</div>
 <div id="shell" class="shell">
   <aside class="sidebar">
     <div class="sidebar-inner">
@@ -143,7 +165,7 @@
       </div>
       <div class="stats">
         <article class="stat"><div class="muted">正在监控</div><div class="num" id="home-watching">-</div><div class="muted" id="home-paused"> </div></article>
-        <article class="stat"><div class="muted">今日告警</div><div class="num" id="home-alerts">-</div><div class="muted" id="home-range-label">最近 1 小时</div></article>
+        <article class="stat hover-stat"><div class="muted">今日告警</div><div class="num" id="home-alerts">-</div><div class="hover-card" id="home-alert-list">这段时间没有告警</div><div class="muted" id="home-range-label">最近 1 小时</div></article>
         <article class="stat"><div class="muted">飞书送达</div><div class="num" id="home-delivered">-</div><div class="muted" id="home-failed"> </div></article>
         <article class="stat"><div class="muted">日志源</div><div class="num" id="home-sources">-</div><div class="muted">当前项目正在使用</div></article>
       </div>
@@ -151,7 +173,17 @@
         <h2>需要处理</h2>
         <div id="home-attention" class="meta">正在读取…</div>
       </div>
-    </section>
+    
+<section id="alert-pane">
+        <div class="section-head"><h2>最近告警</h2></div>
+        <div class="filters">
+          <select id="filter-project"><option value="">全部项目</option></select>
+          <select id="filter-container" disabled><option value="">全部容器</option></select>
+          <select id="filter-keyword" disabled><option value="">全部关键字</option></select>
+        </div>
+        <div id="alerts" class="meta">正在读取…</div>
+      </section>
+</section>
 
     <div class="top" id="page-head">
       <div class="title-row">
@@ -267,15 +299,7 @@
         <div class="section-head"><button id="new-project" type="button">新建项目</button></div>
         <div id="rules" class="meta">正在读取…</div>
       </section>
-      <section id="alert-pane">
-        <div class="section-head"><h2>最近告警</h2><button id="hide-alerts" class="icon-btn" type="button" title="隐藏到右侧"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M15 4v16"/></svg></button></div>
-        <div class="filters">
-          <select id="filter-project"><option value="">选择项目</option></select>
-          <select id="filter-container" disabled><option value="">全部容器</option></select>
-          <select id="filter-keyword" disabled><option value="">全部关键字</option></select>
-        </div>
-        <div id="alerts" class="meta">正在读取…</div>
-      </section>
+      
     </div>
     </main>
 </div>
@@ -307,20 +331,13 @@ $("login-form").onsubmit = async (event) => {
   if (!response.ok) { $("login-error").textContent = result.error || "登录失败"; return; }
   boot();
 };
-function setAlerts(open) {
-  $("main-content").classList.toggle("alerts-hidden", !open);
-  $("hide-alerts").title = open ? "隐藏到右侧" : "展开告警";
-  localStorage.setItem("vmlog-alerts-open", open ? "1" : "0");
-}
 document.addEventListener("click", (event) => {
-  if (event.target.closest("#hide-alerts")) setAlerts($("main-content").classList.contains("alerts-hidden"));
   const toggle = event.target.closest("[data-toggle-containers]");
   if (toggle) {
     const names = toggle.parentElement.querySelector(".container-names");
     if (names) names.classList.toggle("hidden");
   }
 });
-if (localStorage.getItem("vmlog-alerts-open") === "0") setAlerts(false);
 boot();
 if ($("change-password")) $("change-password").onclick = async () => {
   $("password-error").textContent = "";
@@ -503,12 +520,15 @@ async function loadHome() {
   $("home-watching").textContent = data.watching;
   $("home-paused").textContent = data.paused ? data.paused + " 个已暂停" : "没有暂停的项目";
   $("home-alerts").textContent = data.alerts_today;
+  const details = data.alerts || [];
+  $("home-alert-list").innerHTML = details.length ? details.map(item => `<div class="tip-item"><strong>${escapeHtml(item.project)}</strong> · ${escapeHtml(item.keyword)}<div class="meta">${escapeHtml(item.time)}${item.delivered ? "" : " · 发送失败"}<br>${escapeHtml(item.message || "")}</div></div>`).join("") : "这段时间没有告警";
   $("home-range-label").textContent = range === "custom" ? ($("home-start").value.replace("T", " ") + " 至 " + $("home-end").value.replace("T", " ")) : $("home-range").selectedOptions[0].textContent;
   $("home-delivered").textContent = data.delivered;
   $("home-failed").textContent = data.failed ? data.failed + " 条发送失败" : "没有发送失败";
   $("home-sources").textContent = data.sources;
   const rows = (data.attention || []).map(item => `<tr><td>${escapeHtml(item.project)}</td><td>${escapeHtml(item.detail)}</td><td>${escapeHtml(item.time || "")}</td></tr>`).join("");
   $("home-attention").innerHTML = rows ? `<table class="roster"><thead><tr><th>项目</th><th>情况</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table>` : "目前没有需要处理的事项。";
+  renderAlerts();
 }
 async function loadPeople() {
   const data = await (await fetch("/api/users")).json();
@@ -668,7 +688,6 @@ async function refresh() {
   $("rules").querySelectorAll("[data-view]").forEach(btn => btn.onclick = () => {
     const rule = rulesCache.find(item => item.id === btn.dataset.view);
     if (!rule) return;
-    setAlerts(true);
     filtersReady = true;
     forcedRuleId = rule.id;
     renderFilters();
@@ -723,7 +742,7 @@ function renderFilters() {
   } : { ruleId: saved.ruleId || "", container: saved.container || "", keyword: saved.keyword || "" };
   forcedRuleId = "";
   const select = $("filter-project");
-  select.innerHTML = `<option value="">选择项目</option>` + rulesCache.map(rule =>
+  select.innerHTML = `<option value="">全部项目</option>` + rulesCache.map(rule =>
     `<option value="${escapeHtml(rule.id)}">${escapeHtml(rule.name)}</option>`
   ).join("");
   select.value = rulesCache.some(rule => rule.id === desired.ruleId) ? desired.ruleId : "";
@@ -740,30 +759,83 @@ function renderFilters() {
   filtersReady = true;
   saveFilters();
 }
+let tickerKey = "";
+let alertMap = new Map();
+function alertLine(alert) {
+  const message = String(alert.message || alert.text || "").replace(/\s+/g, " ").trim();
+  return `<div class="ticker-row" data-alert="${escapeHtml(alert.id)}">
+    <strong>${escapeHtml(alert.project || "未命名项目")}</strong>
+    <span>${escapeHtml(alert.keyword || "")}</span>
+    <span class="meta">${escapeHtml(alert.container || "未识别容器")}</span>
+    <span class="ticker-msg">${escapeHtml(message)}</span>
+  </div>`;
+}
+function openAlertDetail(id) {
+  const alert = alertMap.get(String(id));
+  if (!alert) return;
+  $("log-title").textContent = alert.project || "告警详情";
+  $("log-meta").textContent = [alert.time, alert.keyword, alert.container, alert.pod].filter(Boolean).join(" · ");
+  $("log-body").textContent = alert.text || alert.message || "";
+  $("log-mask").classList.remove("hidden");
+}
+function paintMarquee(alerts) {
+  if (!alerts.length) {
+    tickerKey = "";
+    $("alerts").innerHTML = "这段时间没有告警。";
+    return;
+  }
+  const key = alerts.map(alert => alert.id).join(",");
+  alertMap = new Map(alerts.map(alert => [String(alert.id), alert]));
+  if (key === tickerKey) return;
+  tickerKey = key;
+  const rows = alerts.map(alertLine).join("");
+  $("alerts").innerHTML = '<div class="marquee"><div class="marquee-track">' + rows + '</div></div>';
+  const box = $("alerts").querySelector(".marquee");
+  const track = $("alerts").querySelector(".marquee-track");
+  let block = rows;
+  let copies = 1;
+  while (track.scrollHeight < box.clientHeight && copies < 8) {
+    block += rows;
+    track.innerHTML = block;
+    copies += 1;
+  }
+  track.innerHTML = block + block;
+  track.style.animationDuration = Math.max(16, alerts.length * copies * 2.2) + "s";
+}
 async function renderAlerts() {
   const ruleId = $("filter-project").value;
   const container = $("filter-container").value;
   const keyword = $("filter-keyword").value;
-  const scrollY = window.scrollY;
-  if (!ruleId) {
-    $("alerts").innerHTML = "请先选择一个项目。每个项目的告警单独查看。";
-    window.scrollTo(0, scrollY);
+  const range = $("home-range").value || "1h";
+  const params = new URLSearchParams({ range, container, keyword });
+  if (range === "custom") {
+    if (!$("home-start").value || !$("home-end").value) {
+      $("alerts").textContent = "请选择开始和结束时间";
+      return;
+    }
+    params.set("start", $("home-start").value);
+    params.set("end", $("home-end").value);
+  }
+  if (ruleId) params.set("rule_id", ruleId);
+  const response = await fetch("/api/alerts?" + params.toString());
+  const alerts = await response.json();
+  if (!response.ok || !Array.isArray(alerts)) {
+    $("alerts").textContent = (alerts && alerts.error) || "告警读取失败";
     return;
   }
-  const params = new URLSearchParams({ rule_id: ruleId, container, keyword });
-  const alerts = await (await fetch("/api/alerts?" + params.toString())).json();
-  const html = alerts.length ? alerts.map(alert => `<div class="alert">
-    <strong>${escapeHtml(alert.project)}</strong>
-    <span class="${alert.delivered ? "ok" : "bad"}">${alert.delivered ? "已发到飞书" : "发送失败"}</span>
-    <div class="meta">${escapeHtml(alert.time)} · ${escapeHtml(alert.keyword)}${alert.container ? " · " + escapeHtml(alert.container) : ""}${alert.error ? `<br><span class="bad">${escapeHtml(alert.error)}</span>` : ""}</div>
-    <pre>${escapeHtml(alert.text || "")}</pre>
-  </div>`).join("") : "这个项目还没有符合条件的告警。";
-  if ($("alerts").innerHTML !== html) $("alerts").innerHTML = html;
-  window.scrollTo(0, scrollY);
+  paintMarquee(alerts);
 }
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[ch]));
 }
+$("alerts").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-alert]");
+  if (row) openAlertDetail(row.dataset.alert);
+});
+$("log-close").onclick = () => $("log-mask").classList.add("hidden");
+$("log-mask").addEventListener("click", (event) => {
+  if (event.target === $("log-mask")) $("log-mask").classList.add("hidden");
+});
 $("filter-project").addEventListener("change", () => {
   filtersReady = true;
   forcedRuleId = $("filter-project").value;

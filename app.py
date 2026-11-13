@@ -23,7 +23,7 @@ WEB_PATH = ROOT / "web" / "index.html"
 STORM_WINDOW_SEC = 10
 STORM_LIMIT = 30
 STORM_PAUSE_SEC = 600
-MSG_LIMIT = 400
+MSG_LIMIT = 8000
 ALERT_HISTORY = 100
 
 
@@ -661,7 +661,7 @@ class Store:
             start = (datetime.now() - spans[range_key]).strftime("%Y-%m-%d %H:%M:%S")
             end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if not rule_ids:
-            return {"watching": 0, "paused": 0, "alerts_today": 0, "delivered": 0, "failed": 0, "sources": 0, "attention": [], "range": range_key}
+            return {"watching": 0, "paused": 0, "alerts_today": 0, "delivered": 0, "failed": 0, "sources": 0, "attention": [], "alerts": [], "range": range_key}
         marks = ",".join(["%s"] * len(rule_ids))
         with self.connect() as conn:
             with conn.cursor() as cursor:
@@ -693,6 +693,15 @@ class Store:
                     [start, end, *rule_ids],
                 )
                 hot = cursor.fetchall()
+                cursor.execute(
+                    f"""
+                    SELECT project, keyword_text, created_at, message, delivered
+                    FROM alerts WHERE created_at>=%s AND created_at<=%s AND rule_id IN ({marks})
+                    ORDER BY id DESC LIMIT 50
+                    """,
+                    [start, end, *rule_ids],
+                )
+                recent = cursor.fetchall()
         attention = []
         for row in failed_rows:
             created = row["created_at"]
@@ -704,26 +713,50 @@ class Store:
         for row in hot:
             if int(row["total"]) >= 10:
                 attention.append({"project": row["project"], "detail": f"今日已告警 {int(row['total'])} 次", "time": "今天"})
+        alerts = []
+        for row in recent:
+            created = row["created_at"]
+            alerts.append({
+                "project": row["project"],
+                "keyword": row["keyword_text"],
+                "time": created.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created, "strftime") else str(created),
+                "message": (row["message"] or "")[:180],
+                "delivered": bool(row["delivered"]),
+            })
         return {
             "delivered": delivered,
             "failed": failed,
             "alerts_today": delivered + failed,
             "attention": attention[:8],
+            "alerts": alerts,
             "range": range_key,
         }
 
-    def list_alerts(self, rule_id="", container="", keyword="", limit=200):
-        if not rule_id:
+    def list_alerts(self, rule_id="", container="", keyword="", limit=200, hours=None, rule_ids=None, start_at=None, end_at=None):
+        ids = [rule_id] if rule_id else [item for item in (rule_ids or []) if item]
+        if not ids:
             return []
-        sql = """
+        marks = ",".join(["%s"] * len(ids))
+        sql = f"""
             SELECT id, created_at, project, keyword_text, namespace_name, container_name,
                    pod_name, log_time, message, delivered, error_text, body, rule_id
-            FROM alerts WHERE rule_id=%s
+            FROM alerts WHERE rule_id IN ({marks})
         """
-        params = [rule_id]
+        params = list(ids)
+        if start_at and end_at:
+            sql += " AND created_at>=%s AND created_at<=%s"
+            params.extend([start_at, end_at])
+        elif hours:
+            sql += " AND created_at>=%s"
+            params.append((datetime.now() - timedelta(hours=float(hours))).strftime("%Y-%m-%d %H:%M:%S"))
         if container:
-            sql += " AND container_name=%s"
-            params.append(container)
+            if "/" in container:
+                namespace, name = container.split("/", 1)
+                sql += " AND container_name=%s AND (namespace_name=%s OR namespace_name='' OR namespace_name IS NULL)"
+                params.extend([name, namespace])
+            else:
+                sql += " AND container_name=%s"
+                params.append(container)
         if keyword:
             sql += " AND keyword_text=%s"
             params.append(keyword)
@@ -1042,7 +1075,8 @@ class TailWorker(threading.Thread):
         self.seen = []
         self.reconnect = False
         self.last_wall = time.time()
-        self.alert_after = time.time() - 5
+        self.alert_after = time.time()
+        self.silence_until = time.time() + 15
 
     def public_state(self):
         with self.state_lock:
@@ -1160,6 +1194,8 @@ class TailWorker(threading.Thread):
             return
         pod = str(entry.get("kubernetes.pod_name", ""))
         container = str(entry.get("container_name", ""))
+        if time.time() < getattr(self, "silence_until", 0):
+            return
         log_epoch = log_time_epoch(entry.get("_time"))
         if log_epoch is not None and log_epoch < self.alert_after:
             return
@@ -1277,14 +1313,45 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/alerts":
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             rule_id = (query.get("rule_id") or [""])[0]
-            if not self.monitor.can_access(user, rule_id):
-                self._send_json({"error": "没有这个项目的权限"}, 403)
-                return
-            self._send_json(self.monitor.store.list_alerts(
-                rule_id=rule_id,
-                container=(query.get("container") or [""])[0],
-                keyword=(query.get("keyword") or [""])[0],
-            ))
+            container = (query.get("container") or [""])[0]
+            keyword = (query.get("keyword") or [""])[0]
+            start_at = (query.get("start") or [""])[0].replace("T", " ")
+            end_at = (query.get("end") or [""])[0].replace("T", " ")
+            if len(start_at) == 16:
+                start_at += ":00"
+            if len(end_at) == 16:
+                end_at += ":00"
+            range_key = (query.get("range") or ["1h"])[0]
+            hours = (query.get("hours") or [""])[0]
+            bounds = {}
+            if start_at and end_at:
+                bounds["start_at"] = start_at
+                bounds["end_at"] = end_at
+            elif hours:
+                try:
+                    bounds["hours"] = float(hours)
+                except ValueError:
+                    bounds["hours"] = None
+            else:
+                spans = {"1h": timedelta(hours=1), "6h": timedelta(hours=6), "24h": timedelta(hours=24), "7d": timedelta(days=7)}
+                if range_key not in spans:
+                    range_key = "1h"
+                bounds["start_at"] = (datetime.now() - spans[range_key]).strftime("%Y-%m-%d %H:%M:%S")
+                bounds["end_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if rule_id:
+                if not self.monitor.can_access(user, rule_id):
+                    self._send_json({"error": "没有这个项目的权限"}, 403)
+                    return
+                rows = self.monitor.store.list_alerts(rule_id=rule_id, container=container, keyword=keyword, limit=500, **bounds)
+            else:
+                rows = self.monitor.store.list_alerts(
+                    rule_ids=sorted(self.monitor.allowed_rule_ids(user)),
+                    container=container,
+                    keyword=keyword,
+                    limit=500,
+                    **bounds,
+                )
+            self._send_json(rows)
             return
         if path == "/api/sources":
             if not user["is_admin"]:

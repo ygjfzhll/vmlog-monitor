@@ -43,6 +43,7 @@ def worker(keywords=None, cooldown=300):
     }
     item = TailWorker(monitor, rule)
     item.alert_after = 0
+    item.silence_until = 0
     return item, monitor
 
 
@@ -137,6 +138,7 @@ class MonitorTests(unittest.TestCase):
     def test_restart_ignores_old_logs(self):
         item, monitor = worker()
         item.alert_after = time.time()
+        item.silence_until = 0
         item._handle_line(line("[ERROR] old log"))
         self.assertEqual(monitor.messages, [])
 
