@@ -206,8 +206,10 @@
       <textarea id="containers" placeholder="ai-pay-app"></textarea>
       <div class="row"><button id="find-containers" class="ghost" type="button">从日志源检索容器</button></div>
       <div id="container-picker" class="meta"></div>
-      <label>关键字，多个用逗号或换行</label>
-      <textarea id="keywords" placeholder="支付失败"></textarea>
+      <label>关键字，多个用逗号或换行。英文单词按整词匹配，不会把 JSON 字段名当成命中</label>
+      <textarea id="keywords" placeholder="[ERROR]"></textarea>
+      <label>排除词，命中后不告警</label>
+      <textarea id="exclude-keywords" placeholder="心跳"></textarea>
       <label>Webhook 地址</label>
       <select id="webhook-id"><option value="">使用默认地址</option></select>
       <label>同一实例重复告警的间隔（秒）</label>
@@ -585,6 +587,7 @@ function fill(rule) {
   $("namespace").value = rule ? (Array.isArray(rule.namespace) ? rule.namespace.join("\n") : rule.namespace) : "";
   $("containers").value = rule ? (rule.containers || []).join("\n") : "";
   $("keywords").value = rule ? (rule.keywords || []).join("\n") : "";
+  $("exclude-keywords").value = rule ? (rule.exclude_keywords || []).join("\n") : "";
   $("cooldown").value = rule ? rule.cooldown_sec : 300;
   $("webhook-id").value = rule && rule.webhook_id ? rule.webhook_id : "";
   $("enabled").checked = rule ? !!rule.enabled : true;
@@ -922,6 +925,7 @@ $("save").onclick = async () => {
     namespace: $("namespace").value.trim(),
     containers: lines($("containers").value),
     keywords: lines($("keywords").value),
+    exclude_keywords: lines($("exclude-keywords").value),
     cooldown_sec: Number($("cooldown").value || 300),
     webhook_id: $("webhook-id").value,
     enabled: $("enabled").checked

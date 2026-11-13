@@ -154,6 +154,32 @@ def container_groups(rule):
     return grouped
 
 
+def keyword_clause(keyword):
+    if re.fullmatch(r"[A-Za-z0-9_]+", keyword or ""):
+        forms = [f"[{keyword}]", f" {keyword} ", f"{keyword}:", f"={keyword}", f"{keyword}]"]
+        return "(" + " OR ".join("i(%s)" % logsql_quote(item) for item in forms) + ")"
+    return "i(%s)" % logsql_quote(keyword)
+
+
+def keyword_in_message(message, keyword):
+    folded = str(message or "").lower()
+    needle = str(keyword or "").lower()
+    if not needle or needle not in folded:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_]+", keyword or ""):
+        return True
+    for match in re.finditer(re.escape(needle), folded):
+        start, end = match.span()
+        before = folded[start - 1] if start else ""
+        after = folded[end] if end < len(folded) else ""
+        if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+            continue
+        if before == '"' and after == '"':
+            continue
+        return True
+    return False
+
+
 def build_query(rule):
     groups = container_groups(rule)
     parts = []
@@ -164,7 +190,10 @@ def build_query(rule):
         else:
             parts.append("{namespace=%s}" % logsql_quote(namespace))
     selector = " OR ".join(parts) if parts else "*"
-    words = " OR ".join(f"i({logsql_quote(item)})" for item in rule["keywords"])
+    words = " OR ".join(keyword_clause(item) for item in rule["keywords"])
+    excludes = rule.get("exclude_keywords") or []
+    if excludes:
+        words = "(" + words + ") AND NOT (" + " OR ".join(keyword_clause(item) for item in excludes) + ")"
     return selector + " (" + words + ") | fields _time,_stream_id,_msg,kubernetes.pod_name,container_name,namespace"
 
 
@@ -224,6 +253,8 @@ class Store:
                 self._ensure_column(cursor, "rules", "paused", "TINYINT NOT NULL DEFAULT 0")
                 self._ensure_column(cursor, "rules", "source_id", "VARCHAR(32) NOT NULL DEFAULT ''")
                 self._ensure_column(cursor, "rules", "webhook_id", "VARCHAR(32) NOT NULL DEFAULT ''")
+                self._ensure_column(cursor, "rules", "exclude_keywords", "TEXT NULL")
+                self._ensure_column(cursor, "rules", "tail_cursor_ms", "BIGINT NOT NULL DEFAULT 0")
                 cursor.execute("ALTER TABLE rules MODIFY namespace_name TEXT NOT NULL")
                 cursor.execute(
                     """
@@ -544,7 +575,7 @@ class Store:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT id, name, namespace_name, containers, keywords, cooldown_sec, enabled, webhook, matched_count, paused, source_id, webhook_id
+                    SELECT id, name, namespace_name, containers, keywords, exclude_keywords, cooldown_sec, enabled, webhook, matched_count, paused, source_id, webhook_id, tail_cursor_ms
                     FROM rules ORDER BY updated_at DESC, id DESC
                     """
                 )
@@ -570,11 +601,12 @@ class Store:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO rules (id, name, namespace_name, containers, keywords, cooldown_sec, enabled, webhook, webhook_id, paused, source_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO rules (id, name, namespace_name, containers, keywords, exclude_keywords, cooldown_sec, enabled, webhook, webhook_id, paused, source_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                         name=VALUES(name), namespace_name=VALUES(namespace_name),
                         containers=VALUES(containers), keywords=VALUES(keywords),
+                        exclude_keywords=VALUES(exclude_keywords),
                         cooldown_sec=VALUES(cooldown_sec), enabled=VALUES(enabled),
                         webhook=VALUES(webhook),
                         webhook_id=VALUES(webhook_id),
@@ -585,6 +617,7 @@ class Store:
                         rule["id"], rule["name"], json.dumps(namespace_list(rule.get("namespace")), ensure_ascii=False),
                         json.dumps(rule["containers"], ensure_ascii=False),
                         json.dumps(rule["keywords"], ensure_ascii=False),
+                        json.dumps(rule.get("exclude_keywords") or [], ensure_ascii=False),
                         rule["cooldown_sec"], 1 if rule["enabled"] else 0,
                         rule.get("webhook", ""),
                         rule.get("webhook_id") or "",
@@ -618,6 +651,14 @@ class Store:
                     ),
                 )
                 return cursor.lastrowid
+
+    def save_tail_cursor(self, rule_id, cursor_ms):
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE rules SET tail_cursor_ms=GREATEST(tail_cursor_ms, %s) WHERE id=%s",
+                    (int(cursor_ms), rule_id),
+                )
 
     def add_matches(self, rule_id, count, by_container=None):
         if count <= 0 and not by_container:
@@ -793,7 +834,9 @@ class Store:
             "namespace": namespace_list(json.loads(row["namespace_name"]) if str(row["namespace_name"]).lstrip().startswith("[") else row["namespace_name"]),
             "containers": json.loads(row["containers"] or "[]"),
             "keywords": json.loads(row["keywords"] or "[]"),
+            "exclude_keywords": json.loads(row.get("exclude_keywords") or "[]"),
             "cooldown_sec": int(row["cooldown_sec"]),
+            "tail_cursor": int(row.get("tail_cursor_ms") or 0) / 1000,
             "enabled": bool(row["enabled"]),
             "paused": bool(row.get("paused")),
             "webhook": row.get("webhook") or "",
@@ -982,12 +1025,23 @@ class Monitor:
             raise RuntimeError("未配置飞书 webhook")
         body = json.dumps({"msg_type": "text", "content": {"text": text}}, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(webhook, data=body, headers={"Content-Type": "application/json"}, method="POST")
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"飞书返回 {exc.code}: {detail[:300]}") from exc
+        last_error = None
+        raw = ""
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    raw = response.read().decode("utf-8", errors="replace")
+                last_error = None
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                last_error = RuntimeError("飞书返回 %s: %s" % (exc.code, detail[:300]))
+            except Exception as exc:
+                last_error = exc
+            if attempt < 2:
+                time.sleep(1)
+        if last_error:
+            raise last_error
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
@@ -1006,6 +1060,7 @@ class Monitor:
         namespaces = self._split(payload.get("namespace", ""))[:50]
         containers = self._split(payload.get("containers", ""))
         keywords = self._split(payload.get("keywords", ""))
+        excludes = self._split(payload.get("exclude_keywords", ""))
         if not name or not namespaces or not keywords:
             raise ValueError("项目名、命名空间和至少一个关键字都要填写")
         try:
@@ -1018,6 +1073,7 @@ class Monitor:
             "namespace": namespaces,
             "containers": containers[:500],
             "keywords": keywords[:30],
+            "exclude_keywords": excludes[:30],
             "cooldown_sec": min(max(cooldown, 30), 86400),
             "enabled": bool(payload.get("enabled", True)),
             "paused": bool(payload["paused"]) if "paused" in payload else None,
@@ -1075,8 +1131,11 @@ class TailWorker(threading.Thread):
         self.seen = []
         self.reconnect = False
         self.last_wall = time.time()
-        self.alert_after = time.time()
-        self.silence_until = time.time() + 15
+        self.tail_cursor = float(rule.get("tail_cursor") or 0)
+        self.cursor_dirty = False
+        self.last_cursor_flush = 0
+        self.alert_after = self.tail_cursor or (time.time() + 5)
+        self.silence_until = 0
 
     def public_state(self):
         with self.state_lock:
@@ -1112,6 +1171,7 @@ class TailWorker(threading.Thread):
                 self.stop_event.wait(delay)
                 delay = min(delay * 2, 30)
         self.flush_matches()
+        self._flush_cursor(force=True)
         self._set(state="stopped")
 
     def _set(self, **updates):
@@ -1211,11 +1271,12 @@ class TailWorker(threading.Thread):
             return
         pod = str(entry.get("kubernetes.pod_name", ""))
         container = str(entry.get("container_name", ""))
-        if time.time() < getattr(self, "silence_until", 0):
-            return
         log_epoch = log_time_epoch(entry.get("_time"))
-        if log_epoch is not None and log_epoch < self.alert_after:
+        if log_epoch is None or log_epoch <= self.alert_after:
+            if log_epoch is not None:
+                self._advance_cursor(log_epoch)
             return
+        self._advance_cursor(log_epoch)
         when = format_log_time(entry.get("_time", ""))
         seen_key = (when, keyword, pod, message[:80])
         if seen_key in self.seen:
@@ -1224,12 +1285,17 @@ class TailWorker(threading.Thread):
         del self.seen[:-1000]
         self._note_match(container)
         now = time.time()
-        bucket = self.buckets.setdefault(keyword, {"count": 0, "last_sent": 0})
+        sample = " ".join(message.split())[:180]
+        bucket = self.buckets.setdefault(keyword, {"count": 0, "last_sent": 0, "samples": []})
         bucket["count"] += 1
+        if sample and sample not in bucket["samples"] and len(bucket["samples"]) < 3:
+            bucket["samples"].append(sample)
         if bucket["last_sent"] and now - bucket["last_sent"] < self.rule["cooldown_sec"]:
             return
         count = bucket["count"]
+        samples = list(bucket["samples"]) or [sample]
         bucket["count"] = 0
+        bucket["samples"] = []
         bucket["last_sent"] = now
         ns_text = "、".join(namespace_list(self.rule.get("namespace")))
         log_namespace = str(entry.get("namespace") or ns_text)
@@ -1244,6 +1310,7 @@ class TailWorker(threading.Thread):
                 f"日志：{message}"
             )
         else:
+            listed = "\n".join(f"{index}. {item}" for index, item in enumerate(samples, 1))
             text = (
                 "【日志汇总】\n"
                 f"项目名称：{self.rule['name']}\n"
@@ -1251,14 +1318,41 @@ class TailWorker(threading.Thread):
                 f"约 {self.rule['cooldown_sec']} 秒内共 {count} 次，已合并成一条。\n"
                 f"位置：{place}\n"
                 f"时间：{when}\n"
-                f"日志：{message}"
+                f"样本：\n{listed}"
             )
         self._emit(text, keyword, message, container, pod, when, count, log_namespace)
 
+    def _advance_cursor(self, log_epoch):
+        if log_epoch <= self.tail_cursor:
+            return
+        self.tail_cursor = log_epoch
+        self.alert_after = max(self.alert_after, log_epoch)
+        self.cursor_dirty = True
+        self._flush_cursor()
+
+    def _flush_cursor(self, force=False):
+        if not self.cursor_dirty:
+            return
+        if not force and time.time() - self.last_cursor_flush < 2:
+            return
+        cursor_ms = int(self.tail_cursor * 1000)
+        self.cursor_dirty = False
+        self.last_cursor_flush = time.time()
+        saver = getattr(self.monitor.store, "save_tail_cursor", None)
+        if not saver:
+            return
+        try:
+            saver(self.rule["id"], cursor_ms)
+        except Exception as exc:
+            self.cursor_dirty = True
+            self._set(last_error=str(exc)[:240])
+
     def _matched_keyword(self, message):
-        folded = message.lower()
+        for keyword in self.rule.get("exclude_keywords") or []:
+            if keyword_in_message(message, keyword):
+                return ""
         for keyword in self.rule["keywords"]:
-            if keyword.lower() in folded:
+            if keyword_in_message(message, keyword):
                 return keyword
         return ""
 

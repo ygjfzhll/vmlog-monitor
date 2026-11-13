@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS rules (
   namespace_name TEXT NOT NULL,
   containers TEXT NOT NULL,
   keywords TEXT NOT NULL,
+  exclude_keywords TEXT NULL,
+  tail_cursor_ms BIGINT NOT NULL DEFAULT 0,
   cooldown_sec INT NOT NULL,
   enabled TINYINT NOT NULL,
   webhook VARCHAR(300) NOT NULL DEFAULT '',

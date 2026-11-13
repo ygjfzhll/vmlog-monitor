@@ -82,6 +82,13 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(item._matched_keyword("[error] boom"), "[ERROR]")
         self.assertEqual(item._matched_keyword("all good"), "")
 
+    def test_plain_error_word_skips_json_key(self):
+        item, _monitor = worker(keywords=["ERROR"])
+        self.assertEqual(item._matched_keyword('[INFO] data={"error":""}'), "")
+        self.assertEqual(item._matched_keyword("[error] task failed"), "ERROR")
+        item.rule["exclude_keywords"] = ["心跳"]
+        self.assertEqual(item._matched_keyword("[ERROR] 心跳正常"), "")
+
     def test_alert_text_shape_and_time(self):
         item, monitor = worker()
         item._handle_line(line("[error] 2026/11/13 10:49:41 task"))
