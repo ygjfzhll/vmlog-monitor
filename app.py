@@ -180,21 +180,50 @@ def keyword_in_message(message, keyword):
     return False
 
 
+def brief_log(message, limit=160):
+    line = " ".join(str(message or "").split())
+    if len(line) <= limit:
+        return line
+    return line[:limit] + "…"
+
+
+def scope_key(rule, entry):
+    if rule.get("deploy_mode") == "host":
+        return str((entry or {}).get("host") or "未识别主机")[:80]
+    return str((entry or {}).get("namespace") or "未识别命名空间")[:80]
+
+
+def scope_floor(known, default_cursor, now, backfill_sec=0):
+    base = known if known else (default_cursor or now + 5)
+    if backfill_sec:
+        return min(base, now - backfill_sec)
+    return base
+
+
+def monitoring_state(exc, source_alive):
+    text = str(exc)[:240]
+    query_failed = text.startswith("查询失败") or isinstance(exc, urllib.error.HTTPError)
+    if query_failed or not source_alive:
+        return "reconnecting", text or "日志查询失败"
+    return "running", ""
+
+
 def build_query(rule):
+    field = "host" if rule.get("deploy_mode") == "host" else "namespace"
     groups = container_groups(rule)
     parts = []
     for namespace, containers in groups.items():
         if containers:
             pattern = "|".join(re.escape(item) for item in containers)
-            parts.append("{namespace=%s,container_name=~%s}" % (logsql_quote(namespace), logsql_quote(pattern)))
+            parts.append("{%s=%s,container_name=~%s}" % (field, logsql_quote(namespace), logsql_quote(pattern)))
         else:
-            parts.append("{namespace=%s}" % logsql_quote(namespace))
+            parts.append("{%s=%s}" % (field, logsql_quote(namespace)))
     selector = " OR ".join(parts) if parts else "*"
     words = " OR ".join(keyword_clause(item) for item in rule["keywords"])
     excludes = rule.get("exclude_keywords") or []
     if excludes:
         words = "(" + words + ") AND NOT (" + " OR ".join(keyword_clause(item) for item in excludes) + ")"
-    return selector + " (" + words + ") | fields _time,_stream_id,_msg,kubernetes.pod_name,container_name,namespace"
+    return selector + " (" + words + ") | fields _time,_stream_id,_msg,kubernetes.pod_name,container_name,namespace,host"
 
 
 class Store:
@@ -255,6 +284,17 @@ class Store:
                 self._ensure_column(cursor, "rules", "webhook_id", "VARCHAR(32) NOT NULL DEFAULT ''")
                 self._ensure_column(cursor, "rules", "exclude_keywords", "TEXT NULL")
                 self._ensure_column(cursor, "rules", "tail_cursor_ms", "BIGINT NOT NULL DEFAULT 0")
+                self._ensure_column(cursor, "rules", "deploy_mode", "VARCHAR(20) NOT NULL DEFAULT 'kubernetes'")
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS tail_cursors (
+                        rule_id VARCHAR(32) NOT NULL,
+                        scope_key VARCHAR(80) NOT NULL,
+                        cursor_ms BIGINT NOT NULL DEFAULT 0,
+                        PRIMARY KEY (rule_id, scope_key)
+                    )
+                    """
+                )
                 cursor.execute("ALTER TABLE rules MODIFY namespace_name TEXT NOT NULL")
                 cursor.execute(
                     """
@@ -575,7 +615,7 @@ class Store:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT id, name, namespace_name, containers, keywords, exclude_keywords, cooldown_sec, enabled, webhook, matched_count, paused, source_id, webhook_id, tail_cursor_ms
+                    SELECT id, name, namespace_name, containers, keywords, exclude_keywords, cooldown_sec, enabled, webhook, matched_count, paused, source_id, webhook_id, tail_cursor_ms, deploy_mode
                     FROM rules ORDER BY updated_at DESC, id DESC
                     """
                 )
@@ -601,8 +641,8 @@ class Store:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO rules (id, name, namespace_name, containers, keywords, exclude_keywords, cooldown_sec, enabled, webhook, webhook_id, paused, source_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO rules (id, name, namespace_name, containers, keywords, exclude_keywords, cooldown_sec, enabled, webhook, webhook_id, paused, source_id, deploy_mode)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                         name=VALUES(name), namespace_name=VALUES(namespace_name),
                         containers=VALUES(containers), keywords=VALUES(keywords),
@@ -611,7 +651,8 @@ class Store:
                         webhook=VALUES(webhook),
                         webhook_id=VALUES(webhook_id),
                         paused=VALUES(paused),
-                        source_id=VALUES(source_id)
+                        source_id=VALUES(source_id),
+                        deploy_mode=VALUES(deploy_mode)
                     """,
                     (
                         rule["id"], rule["name"], json.dumps(namespace_list(rule.get("namespace")), ensure_ascii=False),
@@ -623,6 +664,7 @@ class Store:
                         rule.get("webhook_id") or "",
                         1 if rule.get("paused") else 0,
                         rule.get("source_id") or "",
+                        rule.get("deploy_mode") or "kubernetes",
                     ),
                 )
 
@@ -653,11 +695,27 @@ class Store:
                 return cursor.lastrowid
 
     def save_tail_cursor(self, rule_id, cursor_ms):
+        self.save_scope_cursor(rule_id, "*", cursor_ms)
+
+    def load_scope_cursors(self, rule_id):
         with self.connect() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE rules SET tail_cursor_ms=GREATEST(tail_cursor_ms, %s) WHERE id=%s",
-                    (int(cursor_ms), rule_id),
+                    "SELECT scope_key, cursor_ms FROM tail_cursors WHERE rule_id=%s",
+                    (rule_id,),
+                )
+                return {row["scope_key"]: int(row["cursor_ms"] or 0) / 1000 for row in cursor.fetchall()}
+
+    def save_scope_cursor(self, rule_id, scope_key, cursor_ms):
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO tail_cursors (rule_id, scope_key, cursor_ms)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE cursor_ms=GREATEST(cursor_ms, VALUES(cursor_ms))
+                    """,
+                    (rule_id, (scope_key or "*")[:80], int(cursor_ms)),
                 )
 
     def add_matches(self, rule_id, count, by_container=None):
@@ -702,7 +760,7 @@ class Store:
             start = (datetime.now() - spans[range_key]).strftime("%Y-%m-%d %H:%M:%S")
             end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if not rule_ids:
-            return {"watching": 0, "paused": 0, "alerts_today": 0, "delivered": 0, "failed": 0, "sources": 0, "attention": [], "alerts": [], "range": range_key}
+            return {"watching": 0, "paused": 0, "alerts_today": 0, "delivered": 0, "failed": 0, "sources": 0, "attention": [], "alerts": [], "scopes": [], "range": range_key}
         marks = ",".join(["%s"] * len(rule_ids))
         with self.connect() as conn:
             with conn.cursor() as cursor:
@@ -729,11 +787,21 @@ class Store:
                     f"""
                     SELECT project, COUNT(*) AS total
                     FROM alerts WHERE created_at>=%s AND created_at<=%s AND rule_id IN ({marks})
-                    GROUP BY project ORDER BY total DESC LIMIT 5
+                    GROUP BY project ORDER BY total DESC LIMIT 20
                     """,
                     [start, end, *rule_ids],
                 )
                 hot = cursor.fetchall()
+                cursor.execute(
+                    f"""
+                    SELECT rule_id, project, namespace_name, container_name, COUNT(*) AS total
+                    FROM alerts WHERE created_at>=%s AND created_at<=%s AND rule_id IN ({marks})
+                    GROUP BY rule_id, project, namespace_name, container_name
+                    ORDER BY total DESC LIMIT 30
+                    """,
+                    [start, end, *rule_ids],
+                )
+                scope_rows = cursor.fetchall()
                 cursor.execute(
                     f"""
                     SELECT project, keyword_text, created_at, message, delivered
@@ -752,8 +820,9 @@ class Store:
                 "time": created.strftime("%H:%M") if hasattr(created, "strftime") else str(created),
             })
         for row in hot:
-            if int(row["total"]) >= 10:
-                attention.append({"project": row["project"], "detail": f"今日已告警 {int(row['total'])} 次", "time": "今天"})
+            total = int(row["total"])
+            if total > 0:
+                attention.append({"project": row["project"], "detail": f"这段时间已告警 {total} 次", "time": ""})
         alerts = []
         for row in recent:
             created = row["created_at"]
@@ -770,6 +839,16 @@ class Store:
             "alerts_today": delivered + failed,
             "attention": attention[:8],
             "alerts": alerts,
+            "scopes": [
+                {
+                    "rule_id": row.get("rule_id") or "",
+                    "project": row["project"],
+                    "host": row["namespace_name"] or "",
+                    "container": row["container_name"] or "",
+                    "total": int(row["total"]),
+                }
+                for row in scope_rows
+            ],
             "range": range_key,
         }
 
@@ -843,6 +922,7 @@ class Store:
             "matched": int(row.get("matched_count") or 0),
             "source_id": row.get("source_id") or "",
             "webhook_id": row.get("webhook_id") or "",
+            "deploy_mode": row.get("deploy_mode") or "kubernetes",
         }
 
 
@@ -885,17 +965,20 @@ class Monitor:
         return rule_id in self.allowed_rule_ids(user)
 
 
-    def list_containers(self, source_id, namespace):
+    def list_containers(self, source_id, namespace, deploy_mode="kubernetes"):
+        field = "host" if deploy_mode == "host" else "namespace"
         namespaces = namespace_list(namespace)
-        if not namespaces:
-            raise ValueError("请先填写命名空间")
         source = next((item for item in self.store.list_sources() if item["id"] == source_id), None)
         if not source:
             raise ValueError("请先选择日志源")
+        if not namespaces:
+            if field != "host":
+                raise ValueError("请先填写命名空间")
+            return self._query_source(source, "_time:6h * | stats by (host) count() as hits | sort by (hits) desc | limit 200", "host", "")
         found = []
         seen = set()
         for namespace in namespaces:
-            query = "_time:6h {namespace=%s} | stats by (container_name) count() as hits | sort by (hits) desc" % logsql_quote(namespace)
+            query = "_time:6h {%s=%s} | stats by (container_name) count() as hits | sort by (hits) desc" % (field, logsql_quote(namespace))
             url = source["base_url"].rstrip("/") + "/select/logsql/query"
             data = urllib.parse.urlencode({"query": query}).encode()
             request = urllib.request.Request(
@@ -922,6 +1005,43 @@ class Monitor:
                 if name and key not in seen:
                     seen.add(key)
                     found.append({"namespace": namespace, "name": name})
+        return found
+
+    def _query_source(self, source, query, group_key, group_name):
+        url = source["base_url"].rstrip("/") + "/select/logsql/query"
+        data = urllib.parse.urlencode({"query": query}).encode()
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "AccountID": str(source["account_id"]),
+                "ProjectID": str(source["project_id"]),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise RuntimeError("日志源查询失败") from exc
+        found = []
+        seen = set()
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if group_name == "":
+                name = str(item.get(group_key) or "").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    found.append({"namespace": name, "name": ""})
+            else:
+                name = str(item.get("container_name") or "").strip()
+                key = (group_name, name)
+                if name and key not in seen:
+                    seen.add(key)
+                    found.append({"namespace": group_name, "name": name})
         return found
 
     def start(self):
@@ -995,6 +1115,11 @@ class Monitor:
                 if hook:
                     rule["webhook"] = hook["hook_url"]
         self.store.save_rule(rule)
+        try:
+            backfill = int(payload.get("backfill_sec") or 0)
+        except (TypeError, ValueError):
+            backfill = 0
+        rule["backfill_sec"] = backfill if backfill in (300, 900) else 0
         if user:
             self.store.audit(user["display_name"], "保存项目", rule["id"], rule["name"])
         with self.lock:
@@ -1061,8 +1186,11 @@ class Monitor:
         containers = self._split(payload.get("containers", ""))
         keywords = self._split(payload.get("keywords", ""))
         excludes = self._split(payload.get("exclude_keywords", ""))
-        if not name or not namespaces or not keywords:
-            raise ValueError("项目名、命名空间和至少一个关键字都要填写")
+        mode = str(payload.get("deploy_mode") or "kubernetes").strip()
+        if mode not in ("kubernetes", "host"):
+            mode = "kubernetes"
+        if not name or not keywords or not namespaces:
+            raise ValueError("请填写项目名、%s和至少一个关键字" % ("主机名" if mode == "host" else "命名空间"))
         try:
             cooldown = int(payload.get("cooldown_sec", 300))
         except (TypeError, ValueError):
@@ -1080,6 +1208,7 @@ class Monitor:
             "webhook": str(payload.get("webhook", "")).strip()[:300],
             "source_id": str(payload.get("source_id", "")).strip()[:32],
             "webhook_id": str(payload.get("webhook_id", "")).strip()[:32],
+            "deploy_mode": mode,
         }
 
     @staticmethod
@@ -1131,11 +1260,20 @@ class TailWorker(threading.Thread):
         self.seen = []
         self.reconnect = False
         self.last_wall = time.time()
-        self.tail_cursor = float(rule.get("tail_cursor") or 0)
+        self.default_cursor = float(rule.get("tail_cursor") or 0)
+        self.scope_cursors = {}
+        self.pending_scopes = {}
         self.cursor_dirty = False
         self.last_cursor_flush = 0
-        self.alert_after = self.tail_cursor or (time.time() + 5)
+        self.backfill_sec = int(rule.get("backfill_sec") or 0)
+        self.backfill_offset = "%ss" % self.backfill_sec if self.backfill_sec else ""
         self.silence_until = 0
+        loader = getattr(monitor.store, "load_scope_cursors", None)
+        if loader:
+            try:
+                self.scope_cursors = loader(rule["id"])
+            except Exception:
+                self.scope_cursors = {}
 
     def public_state(self):
         with self.state_lock:
@@ -1154,22 +1292,22 @@ class TailWorker(threading.Thread):
         delay = 2
         while not self.stop_event.is_set():
             try:
-                self._set(state="running", last_error="")
                 self._tail()
                 delay = 2
             except Exception as exc:
                 if self.stop_event.is_set():
                     break
-                if self._source_alive():
-                    self.reconnect = False
-                    self._set(state="running", last_error="")
-                    self.stop_event.wait(1)
-                    delay = 2
+                state, text = monitoring_state(exc, self._source_alive())
+                if state == "reconnecting":
+                    self.reconnect = True
+                    self._set(state="reconnecting", last_error=text)
+                    self.stop_event.wait(delay)
+                    delay = min(delay * 2, 30)
                     continue
-                self.reconnect = True
-                self._set(state="reconnecting", last_error=str(exc)[:240])
-                self.stop_event.wait(delay)
-                delay = min(delay * 2, 30)
+                self.reconnect = False
+                self._set(state="running", last_error="")
+                self.stop_event.wait(1)
+                delay = 2
         self.flush_matches()
         self._flush_cursor(force=True)
         self._set(state="stopped")
@@ -1224,6 +1362,9 @@ class TailWorker(threading.Thread):
             "refresh_interval": "1s",
             "offset": "2s",
         }
+        if self.backfill_offset:
+            payload["start_offset"] = self.backfill_offset
+            self.backfill_offset = ""
         form = urllib.parse.urlencode(payload).encode()
         request = urllib.request.Request(
             url,
@@ -1235,7 +1376,13 @@ class TailWorker(threading.Thread):
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=15) as response:
+        try:
+            response = urllib.request.urlopen(request, timeout=15)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError("查询失败 %s: %s" % (exc.code, detail[:180])) from exc
+        with response:
+            self._set(state="running", last_error="")
             while not self.stop_event.is_set():
                 try:
                     line = response.readline()
@@ -1271,12 +1418,14 @@ class TailWorker(threading.Thread):
             return
         pod = str(entry.get("kubernetes.pod_name", ""))
         container = str(entry.get("container_name", ""))
+        scope = scope_key(self.rule, entry)
         log_epoch = log_time_epoch(entry.get("_time"))
-        if log_epoch is None or log_epoch <= self.alert_after:
+        floor = scope_floor(self.scope_cursors.get(scope), self.default_cursor, time.time(), self.backfill_sec)
+        if log_epoch is None or log_epoch <= floor:
             if log_epoch is not None:
-                self._advance_cursor(log_epoch)
+                self._advance_scope(scope, log_epoch)
             return
-        self._advance_cursor(log_epoch)
+        self._advance_scope(scope, log_epoch)
         when = format_log_time(entry.get("_time", ""))
         seen_key = (when, keyword, pod, message[:80])
         if seen_key in self.seen:
@@ -1298,8 +1447,12 @@ class TailWorker(threading.Thread):
         bucket["samples"] = []
         bucket["last_sent"] = now
         ns_text = "、".join(namespace_list(self.rule.get("namespace")))
-        log_namespace = str(entry.get("namespace") or ns_text)
-        place = f"{log_namespace} / {container or '未识别容器'} / {pod or '未识别实例'}"
+        if self.rule.get("deploy_mode") == "host":
+            log_namespace = str(entry.get("host") or ns_text)
+            place = f"{log_namespace} / {container or '未识别容器'}"
+        else:
+            log_namespace = str(entry.get("namespace") or ns_text)
+            place = f"{log_namespace} / {container or '未识别容器'} / {pod or '未识别实例'}"
         if count == 1:
             text = (
                 "【日志告警】\n"
@@ -1307,7 +1460,7 @@ class TailWorker(threading.Thread):
                 f"命中关键字：{keyword}\n"
                 f"位置：{place}\n"
                 f"时间：{when}\n"
-                f"日志：{message}"
+                f"日志：{brief_log(message)}"
             )
         else:
             listed = "\n".join(f"{index}. {item}" for index, item in enumerate(samples, 1))
@@ -1322,39 +1475,44 @@ class TailWorker(threading.Thread):
             )
         self._emit(text, keyword, message, container, pod, when, count, log_namespace)
 
-    def _advance_cursor(self, log_epoch):
-        if log_epoch <= self.tail_cursor:
+    def _advance_scope(self, scope, log_epoch):
+        current = self.scope_cursors.get(scope, 0)
+        if log_epoch <= current:
             return
-        self.tail_cursor = log_epoch
-        self.alert_after = max(self.alert_after, log_epoch)
+        self.scope_cursors[scope] = log_epoch
+        self.pending_scopes[scope] = log_epoch
         self.cursor_dirty = True
         self._flush_cursor()
 
     def _flush_cursor(self, force=False):
-        if not self.cursor_dirty:
+        if not self.cursor_dirty or not self.pending_scopes:
             return
         if not force and time.time() - self.last_cursor_flush < 2:
             return
-        cursor_ms = int(self.tail_cursor * 1000)
+        pending = dict(self.pending_scopes)
+        self.pending_scopes = {}
         self.cursor_dirty = False
         self.last_cursor_flush = time.time()
-        saver = getattr(self.monitor.store, "save_tail_cursor", None)
+        saver = getattr(self.monitor.store, "save_scope_cursor", None)
         if not saver:
             return
         try:
-            saver(self.rule["id"], cursor_ms)
+            for scope, epoch in pending.items():
+                saver(self.rule["id"], scope, int(epoch * 1000))
         except Exception as exc:
+            self.pending_scopes.update(pending)
             self.cursor_dirty = True
             self._set(last_error=str(exc)[:240])
 
-    def _matched_keyword(self, message):
+    def _matched_keywords(self, message):
         for keyword in self.rule.get("exclude_keywords") or []:
             if keyword_in_message(message, keyword):
-                return ""
-        for keyword in self.rule["keywords"]:
-            if keyword_in_message(message, keyword):
-                return keyword
-        return ""
+                return []
+        return [keyword for keyword in self.rule["keywords"] if keyword_in_message(message, keyword)]
+
+    def _matched_keyword(self, message):
+        found = self._matched_keywords(message)
+        return found[0] if found else ""
 
     def _emit(self, text, keyword, message, container, pod, when, count=1, log_namespace=""):
         delivered = True
@@ -1414,7 +1572,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/containers":
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
-                names = self.monitor.list_containers((query.get("source_id") or [""])[0], (query.get("namespace") or [""])[0])
+                names = self.monitor.list_containers((query.get("source_id") or [""])[0], (query.get("namespace") or [""])[0], (query.get("deploy") or ["kubernetes"])[0])
                 self._send_json(names)
             except ValueError as exc:
                 self._send_json({"error": str(exc)}, 400)

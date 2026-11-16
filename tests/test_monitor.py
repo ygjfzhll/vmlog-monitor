@@ -3,7 +3,7 @@ import time
 import unittest
 
 import app
-from app import TailWorker, build_query, format_log_time, mask_text, should_watch
+from app import TailWorker, brief_log, build_query, format_log_time, mask_text, monitoring_state, scope_floor, should_watch
 
 
 class FakeStore:
@@ -44,6 +44,10 @@ def worker(keywords=None, cooldown=300):
     item = TailWorker(monitor, rule)
     item.alert_after = 0
     item.silence_until = 0
+    item.default_cursor = 1
+    item.backfill_sec = 0
+    item.scope_cursors = {}
+    item.pending_scopes = {}
     return item, monitor
 
 
@@ -75,6 +79,10 @@ class MonitorTests(unittest.TestCase):
         self.assertIn('{namespace="public",container_name=~"app\\\\-b"}', scoped)
         self.assertNotIn("app-a", scoped.split("public")[1])
         self.assertIn('i("[ERROR]")', query)
+        host = build_query({"namespace": "GPU-5090-32024", "containers": ["video_sr-worker-1"], "keywords": ["ERROR"], "deploy_mode": "host"})
+        self.assertIn('host="GPU-5090-32024"', host)
+        self.assertIn("video_sr", host)
+        self.assertNotIn("namespace=", host)
         self.assertNotIn("kubernetes.pod_namespace", query)
 
     def test_keyword_match_ignores_case(self):
@@ -144,10 +152,37 @@ class MonitorTests(unittest.TestCase):
 
     def test_restart_ignores_old_logs(self):
         item, monitor = worker()
-        item.alert_after = time.time()
+        item.default_cursor = time.time()
+        item.scope_cursors = {}
+        item.backfill_sec = 0
         item.silence_until = 0
         item._handle_line(line("[ERROR] old log"))
         self.assertEqual(monitor.messages, [])
+
+
+    def test_one_keyword_line_is_enough(self):
+        item, _monitor = worker(keywords=["ERROR", "gpu worker shot failed"])
+        self.assertEqual(item._matched_keyword("ERROR vsr task"), "ERROR")
+        self.assertEqual(item._matched_keyword("gpu worker shot failed"), "gpu worker shot failed")
+        self.assertEqual(item._matched_keyword("all good"), "")
+
+    def test_query_failure_stays_visible_when_source_is_alive(self):
+        state, error = monitoring_state(RuntimeError("查询失败 400: bad query"), True)
+        self.assertEqual(state, "reconnecting")
+        self.assertIn("查询失败", error)
+        state, error = monitoring_state(ConnectionError("实时连接已断开"), True)
+        self.assertEqual(state, "running")
+        self.assertEqual(error, "")
+
+    def test_hosts_keep_separate_cursors(self):
+        now = 1_000_000
+        self.assertEqual(scope_floor(now - 10, now, now, 0), now - 10)
+        self.assertEqual(scope_floor(None, now, now, 0), now)
+        self.assertLess(scope_floor(now, now, now, 300), now)
+
+    def test_feishu_text_is_short(self):
+        self.assertLessEqual(len(brief_log("x" * 500)), 161)
+        self.assertIn("错误", brief_log("  错误   详情  "))
 
 if __name__ == "__main__":
     unittest.main()

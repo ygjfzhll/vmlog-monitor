@@ -173,6 +173,10 @@
         <h2>需要处理</h2>
         <div id="home-attention" class="meta">正在读取…</div>
       </div>
+      <div class="panel">
+        <h2>告警分布</h2>
+        <div id="home-scopes" class="meta">正在读取…</div>
+      </div>
     
 <section id="alert-pane">
         <div class="section-head"><h2>最近告警</h2></div>
@@ -200,12 +204,18 @@
       <input id="name" placeholder="例如 支付服务">
       <label>日志源</label>
       <select id="source-id"></select>
-      <label>命名空间，多个用逗号或换行</label>
+      <label>部署方式</label>
+      <select id="deploy-mode">
+        <option value="kubernetes">Kubernetes</option>
+        <option value="host">主机</option>
+      </select>
+      <label id="scope-label">命名空间，多个用逗号或换行</label>
       <textarea id="namespace" placeholder="jzai"></textarea>
-      <label>容器，多个用逗号或换行。留空表示整个命名空间</label>
+      <label id="container-label">容器，多个用逗号或换行。留空表示整个命名空间</label>
       <textarea id="containers" placeholder="ai-pay-app"></textarea>
       <div class="row"><button id="find-containers" class="ghost" type="button">从日志源检索容器</button></div>
       <div id="container-picker" class="meta"></div>
+      <div id="scope-preview" class="meta">实际范围会显示在这里。</div>
       <label>关键字，多个用逗号或换行。英文单词按整词匹配，不会把 JSON 字段名当成命中</label>
       <textarea id="keywords" placeholder="[ERROR]"></textarea>
       <label>排除词，命中后不告警</label>
@@ -214,6 +224,12 @@
       <select id="webhook-id"><option value="">使用默认地址</option></select>
       <label>同一实例重复告警的间隔（秒）</label>
       <input id="cooldown" type="number" min="30" value="300">
+      <label>保存后补查</label>
+      <select id="backfill">
+        <option value="0">不补查，只看新日志</option>
+        <option value="300">补最近 5 分钟</option>
+        <option value="900">补最近 15 分钟</option>
+      </select>
       <label class="check"><input id="enabled" type="checkbox" checked> 启用</label>
       <div class="row">
         <button id="save" type="button">保存</button>
@@ -530,6 +546,14 @@ async function loadHome() {
   $("home-sources").textContent = data.sources;
   const rows = (data.attention || []).map(item => `<tr><td>${escapeHtml(item.project)}</td><td>${escapeHtml(item.detail)}</td><td>${escapeHtml(item.time || "")}</td></tr>`).join("");
   $("home-attention").innerHTML = rows ? `<table class="roster"><thead><tr><th>项目</th><th>情况</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table>` : "目前没有需要处理的事项。";
+  const scopes = data.scopes || [];
+  const scopeRows = scopes.map(item => {
+    const where = [item.host, item.container].filter(Boolean).join(" / ");
+    const key = [item.host, item.container].filter(Boolean).join("/");
+    return `<tr data-rule="${escapeHtml(item.rule_id)}" data-container="${escapeHtml(key)}" style="cursor:pointer"><td>${escapeHtml(item.project)}</td><td>${escapeHtml(where || "未识别位置")}</td><td>${item.total} 次</td></tr>`;
+  }).join("");
+  $("home-scopes").innerHTML = scopeRows ? `<table class="roster"><thead><tr><th>项目</th><th>主机或容器</th><th>次数</th></tr></thead><tbody>${scopeRows}</tbody></table>` : "这段时间没有告警。";
+  $("home-scopes").querySelectorAll("[data-rule]").forEach(row => row.onclick = () => focusScope(row.dataset.rule, row.dataset.container));
   renderAlerts();
 }
 async function loadPeople() {
@@ -574,6 +598,34 @@ const shell = $("shell");
 const stateText = { running:"监控中", paused:"已暂停", reconnecting:"正在重连", starting:"启动中", stopped:"未启用" };
 let rulesCache = [];
 function lines(value) { return value.split(/[\n,，]+/).map(s => s.trim()).filter(Boolean); }
+function scopePreview() {
+  const box = $("scope-preview");
+  if (!box) return;
+  const mode = $("deploy-mode") && $("deploy-mode").value === "host" ? "主机" : "命名空间";
+  const names = lines($("namespace").value);
+  const containers = lines($("containers").value);
+  const grouped = {};
+  names.forEach(name => { grouped[name] = []; });
+  const plain = [];
+  containers.forEach(item => {
+    const mark = item.indexOf("/");
+    if (mark > 0) {
+      const scope = item.slice(0, mark).trim();
+      const container = item.slice(mark + 1).trim();
+      if (!grouped[scope]) grouped[scope] = [];
+      if (container && !grouped[scope].includes(container)) grouped[scope].push(container);
+    } else {
+      plain.push(item);
+    }
+  });
+  Object.keys(grouped).forEach(name => {
+    plain.forEach(container => {
+      if (!grouped[name].includes(container)) grouped[name].push(container);
+    });
+  });
+  const rows = Object.keys(grouped).map(name => name + "：" + (grouped[name].length ? grouped[name].join("、") : "全部容器"));
+  box.textContent = rows.length ? ("实际范围 · " + mode + " · " + rows.join("；")) : "还没有填写范围。";
+}
 function setMenu(open) {
   shell.classList.toggle("collapsed", !open);
   $("hide-menu").title = open ? "收起侧栏" : "展开侧栏";
@@ -584,6 +636,8 @@ function fill(rule) {
   $("rule-id").value = rule ? rule.id : "";
   $("name").value = rule ? rule.name : "";
   $("source-id").value = rule && rule.source_id ? rule.source_id : ($("source-id").value || "");
+  $("deploy-mode").value = rule && rule.deploy_mode === "host" ? "host" : "kubernetes";
+  applyDeployMode();
   $("namespace").value = rule ? (Array.isArray(rule.namespace) ? rule.namespace.join("\n") : rule.namespace) : "";
   $("containers").value = rule ? (rule.containers || []).join("\n") : "";
   $("keywords").value = rule ? (rule.keywords || []).join("\n") : "";
@@ -592,6 +646,8 @@ function fill(rule) {
   $("webhook-id").value = rule && rule.webhook_id ? rule.webhook_id : "";
   $("enabled").checked = rule ? !!rule.enabled : true;
   $("form-error").textContent = "";
+  if ($("backfill")) $("backfill").value = "0";
+  scopePreview();
   showEditor();
   renderMenu();
 }
@@ -655,7 +711,8 @@ function projectRow(rule) {
   const containerText = containers.length
     ? "<button type=\"button\" class=\"linkish\" data-toggle-containers>" + containers.length + " 个容器</button><div class=\"container-names hidden\">" + escapeHtml(containers.join("、")) + "</div>"
     : "全部容器";
-  const scope = escapeHtml(rule.source_name || "未选日志源") + "<br>" + escapeHtml(Array.isArray(rule.namespace) ? rule.namespace.join("、") : rule.namespace) + " / " + containerText;
+  const modeText = rule.deploy_mode === "host" ? "主机" : "Kubernetes";
+  const scope = escapeHtml(modeText) + " · " + escapeHtml(rule.source_name || "未选日志源") + "<br>" + escapeHtml(Array.isArray(rule.namespace) ? rule.namespace.join("、") : rule.namespace) + " / " + containerText;
   const words = escapeHtml((rule.keywords || []).join("、"));
   const fault = state === "reconnecting" && runtime.last_error ? "<div class=\"meta\">" + escapeHtml(runtime.last_error) + "</div>" : "";
   return "<tr><td><strong>" + escapeHtml(rule.name) + "</strong></td><td><span class=\"state " + state + "\">" + (stateText[state] || state) + "</span>" + fault + "</td><td class=\"meta\">" + scope + "<br>关键字：" + words + "</td><td><div class=\"row\"><button class=\"ghost\" data-edit=\"" + rule.id + "\">修改</button><button class=\"ghost\" data-pause=\"" + rule.id + "\">" + pause + "</button>" + admin + "</div></td></tr>";
@@ -764,6 +821,16 @@ function renderFilters() {
   saveFilters();
 }
 let tickerKey = "";
+let scopeContainer = "";
+function focusScope(ruleId, containerKey) {
+  filtersReady = true;
+  forcedRuleId = ruleId || "";
+  scopeContainer = containerKey || "";
+  renderFilters();
+  renderAlerts();
+  const pane = $("alert-pane");
+  if (pane) pane.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 let alertMap = new Map();
 function alertLine(alert) {
   const message = String(alert.message || alert.text || "").replace(/\s+/g, " ").trim();
@@ -779,7 +846,7 @@ function openAlertDetail(id) {
   if (!alert) return;
   $("log-title").textContent = alert.project || "告警详情";
   $("log-meta").textContent = [alert.time, alert.keyword, alert.container, alert.pod].filter(Boolean).join(" · ");
-  $("log-body").textContent = alert.text || alert.message || "";
+  $("log-body").textContent = alert.message || alert.text || "";
   $("log-mask").classList.remove("hidden");
 }
 function paintMarquee(alerts) {
@@ -808,7 +875,7 @@ function paintMarquee(alerts) {
 }
 async function renderAlerts() {
   const ruleId = $("filter-project").value;
-  const container = $("filter-container").value;
+  const container = scopeContainer || $("filter-container").value;
   const keyword = $("filter-keyword").value;
   const range = $("home-range").value || "1h";
   const params = new URLSearchParams({ range, container, keyword });
@@ -841,12 +908,13 @@ $("log-mask").addEventListener("click", (event) => {
   if (event.target === $("log-mask")) $("log-mask").classList.add("hidden");
 });
 $("filter-project").addEventListener("change", () => {
+  scopeContainer = "";
   filtersReady = true;
   forcedRuleId = $("filter-project").value;
   renderFilters();
   renderAlerts();
 });
-["filter-container","filter-keyword"].forEach(id => $(id).addEventListener("change", () => { saveFilters(); renderAlerts(); }));
+["filter-container","filter-keyword"].forEach(id => $(id).addEventListener("change", () => { scopeContainer = ""; saveFilters(); renderAlerts(); }));
 $("grant-cancel").onclick = () => $("grant-panel").classList.add("hidden");
 $("grant-save").onclick = async () => {
   const user_ids = [...$("grant-users").querySelectorAll("input:checked")].map(item => item.value);
@@ -886,18 +954,35 @@ $("new-project").onclick = () => { showOnly("editor"); fill(null); };
 $("hide-menu").onclick = () => setMenu(shell.classList.contains("collapsed"));
 $("reset").onclick = () => fill(null);
 
+function applyDeployMode() {
+  const host = $("deploy-mode").value === "host";
+  $("scope-label").textContent = host ? "主机名，多个用逗号或换行" : "命名空间，多个用逗号或换行";
+  $("namespace").placeholder = host ? "GPU-5090-32024" : "jzai";
+  $("container-label").textContent = host ? "容器，多个用逗号或换行。留空表示整台主机" : "容器，多个用逗号或换行。留空表示整个命名空间";
+  $("containers").placeholder = host ? "video_sr-worker-1" : "ai-pay-app";
+  $("find-containers").textContent = host ? "从日志源检索主机和容器" : "从日志源检索容器";
+}
+$("deploy-mode").addEventListener("change", applyDeployMode);
+["namespace","containers","deploy-mode"].forEach(id => $(id).addEventListener("input", scopePreview));
+$("deploy-mode").addEventListener("change", scopePreview);
+
 $("find-containers").onclick = async () => {
-  $("container-picker").textContent = "正在按命名空间检索…";
-  const params = new URLSearchParams({ source_id: $("source-id").value, namespace: $("namespace").value.trim() });
+  const host = $("deploy-mode").value === "host";
+  $("container-picker").textContent = host ? "正在检索主机和容器…" : "正在按命名空间检索…";
+  const params = new URLSearchParams({ source_id: $("source-id").value, namespace: $("namespace").value.trim(), deploy: $("deploy-mode").value });
   const response = await fetch("/api/containers?" + params.toString());
   const result = await response.json();
   if (!response.ok) { $("container-picker").textContent = result.error || "检索失败"; return; }
-  if (!result.length) { $("container-picker").textContent = "这些命名空间最近 6 小时没有容器。"; return; }
+  if (!result.length) { $("container-picker").textContent = host ? "最近 6 小时没有查到主机或容器。" : "这些命名空间最近 6 小时没有容器。"; return; }
   const selected = new Set(lines($("containers").value));
   const groups = {};
   result.forEach(item => {
     const namespace = item.namespace || "";
     const name = item.name || "";
+    if (!name) {
+      if (!groups[namespace]) groups[namespace] = [];
+      return;
+    }
     if (!groups[namespace]) groups[namespace] = [];
     groups[namespace].push(name);
   });
@@ -910,9 +995,18 @@ $("find-containers").onclick = async () => {
     return `<div class="meta"><strong>${escapeHtml(namespace)}</strong></div>${boxes}`;
   }).join("") + '<div class="row"><button id="import-containers" type="button">导入到项目</button></div>';
   $("container-picker").innerHTML = html;
+  const hostsOnly = result.every(item => !item.name);
+  if (hostsOnly) {
+    $("container-picker").innerHTML = result.map(item => `<label class="check"><input type="checkbox" value="${escapeHtml(item.namespace)}"> ${escapeHtml(item.namespace)}</label>`).join("") + '<div class="row"><button id="import-containers" type="button">导入主机</button></div>';
+    $("import-containers").onclick = () => {
+      const picked = [...$("container-picker").querySelectorAll("input:checked")].map(item => item.value);
+      const merged = [...new Set(lines($("namespace").value).concat(picked))];
+      $("namespace").value = merged.join("\n");
+    };
+    return;
+  }
   $("import-containers").onclick = () => {
-    const picked = [...$("container-picker").querySelectorAll("input")].map(item => item.value);
-    $("container-picker").querySelectorAll("input").forEach(item => { item.checked = true; });
+    const picked = [...$("container-picker").querySelectorAll("input:checked")].map(item => item.value);
     const merged = [...new Set(lines($("containers").value).concat(picked))];
     $("containers").value = merged.join("\n");
   };
@@ -923,12 +1017,14 @@ $("save").onclick = async () => {
     name: $("name").value.trim(),
     source_id: $("source-id").value,
     namespace: $("namespace").value.trim(),
+    deploy_mode: $("deploy-mode").value,
     containers: lines($("containers").value),
     keywords: lines($("keywords").value),
     exclude_keywords: lines($("exclude-keywords").value),
     cooldown_sec: Number($("cooldown").value || 300),
     webhook_id: $("webhook-id").value,
-    enabled: $("enabled").checked
+    enabled: $("enabled").checked,
+    backfill_sec: Number($("backfill").value || 0)
   };
   const id = $("rule-id").value;
   const response = await fetch(id ? "/api/rules/" + id : "/api/rules", {
