@@ -200,6 +200,65 @@ def scope_floor(known, default_cursor, now, backfill_sec=0):
     return base
 
 
+def shard_rules(rule, size=8):
+    names = namespace_list(rule.get("namespace"))
+    if rule.get("deploy_mode") != "host" or len(names) <= size:
+        return [rule]
+    shards = []
+    for start in range(0, len(names), size):
+        chosen = names[start:start + size]
+        part = dict(rule)
+        part["namespace"] = chosen
+        chosen_set = set(chosen)
+        containers = []
+        for item in rule.get("containers") or []:
+            text = str(item)
+            if "/" in text:
+                host, _container = text.split("/", 1)
+                if host.strip() in chosen_set:
+                    containers.append(item)
+            else:
+                containers.append(item)
+        part["containers"] = containers
+        part["shard"] = "%s-%s" % (start + 1, start + len(chosen))
+        shards.append(part)
+    return shards
+
+
+def combine_worker_state(raw):
+    if not raw:
+        return {"state": "stopped", "last_error": "", "matched": 0, "container_hits": {}, "last_match": None}
+    group = raw if isinstance(raw, list) else [raw]
+    states = [item.public_state() for item in group]
+    if any(item["state"] == "reconnecting" for item in states):
+        state = "reconnecting"
+    elif any(item["state"] == "running" for item in states):
+        state = "running"
+    else:
+        state = states[0]["state"]
+    errors = []
+    for item in states:
+        if item.get("last_error") and item["last_error"] not in errors:
+            errors.append(item["last_error"])
+    hits = {}
+    for item in states:
+        for name, count in (item.get("container_hits") or {}).items():
+            hits[name] = hits.get(name, 0) + count
+    last_values = [item.get("last_match") or 0 for item in states]
+    last_match = max(last_values) if last_values else 0
+    return {
+        "state": state,
+        "last_error": "；".join(errors)[:240],
+        "matched": sum(item.get("matched") or 0 for item in states),
+        "container_hits": hits,
+        "last_match": last_match or None,
+    }
+
+
+def should_alert_quiet(last_sent, now, interval=1800):
+    return not last_sent or now - last_sent >= interval
+
+
 def monitoring_state(exc, source_alive):
     text = str(exc)[:240]
     query_failed = text.startswith("查询失败") or isinstance(exc, urllib.error.HTTPError)
@@ -224,6 +283,9 @@ def build_query(rule):
     if excludes:
         words = "(" + words + ") AND NOT (" + " OR ".join(keyword_clause(item) for item in excludes) + ")"
     return selector + " (" + words + ") | fields _time,_stream_id,_msg,kubernetes.pod_name,container_name,namespace,host"
+
+
+DEFAULT_SYSTEM_TITLE = "九州文化日志实时告警系统"
 
 
 class Store:
@@ -292,6 +354,15 @@ class Store:
                         scope_key VARCHAR(80) NOT NULL,
                         cursor_ms BIGINT NOT NULL DEFAULT 0,
                         PRIMARY KEY (rule_id, scope_key)
+                    )
+                    """
+                )
+                self._ensure_column(cursor, "alerts", "retry_count", "INT NOT NULL DEFAULT 0")
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS settings (
+                        name VARCHAR(40) PRIMARY KEY,
+                        value TEXT NOT NULL
                     )
                     """
                 )
@@ -474,6 +545,24 @@ class Store:
                 if cursor.fetchone()["total"]:
                     raise ValueError("还有项目在使用这个 Webhook")
                 cursor.execute("DELETE FROM webhooks WHERE id=%s", (webhook_id,))
+
+    def get_setting(self, name, default=""):
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT value FROM settings WHERE name=%s", (name,))
+                row = cursor.fetchone()
+        return row["value"] if row and row["value"] else default
+
+    def set_setting(self, name, value):
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO settings (name, value) VALUES (%s, %s)
+                    ON DUPLICATE KEY UPDATE value=VALUES(value)
+                    """,
+                    (name, value),
+                )
 
     def ensure_admin(self, username, password):
         with self.connect() as conn:
@@ -693,6 +782,35 @@ class Store:
                     ),
                 )
                 return cursor.lastrowid
+
+    def pending_retries(self):
+        since = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT a.id, a.body, a.retry_count, r.webhook
+                    FROM alerts a
+                    JOIN rules r ON a.rule_id=r.id
+                    WHERE a.delivered=0 AND a.retry_count<3 AND a.created_at>=%s AND r.webhook<>''
+                    ORDER BY a.id LIMIT 20
+                    """,
+                    (since,),
+                )
+                return list(cursor.fetchall())
+
+    def mark_delivered(self, alert_id):
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("UPDATE alerts SET delivered=1, error_text=NULL WHERE id=%s", (alert_id,))
+
+    def bump_retry(self, alert_id, error):
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE alerts SET retry_count=retry_count+1, error_text=%s WHERE id=%s",
+                    ((error or "")[:240], alert_id),
+                )
 
     def save_tail_cursor(self, rule_id, cursor_ms):
         self.save_scope_cursor(rule_id, "*", cursor_ms)
@@ -1048,6 +1166,24 @@ class Monitor:
         for rule in list(self.rules):
             if should_watch(rule):
                 self._start_worker(rule)
+        threading.Thread(target=self._retry_failed_alerts, name="feishu-retry", daemon=True).start()
+
+    def _retry_failed_alerts(self):
+        while True:
+            time.sleep(60)
+            try:
+                rows = self.store.pending_retries()
+            except Exception:
+                continue
+            for row in rows:
+                try:
+                    self.send_feishu(row["body"], row["webhook"])
+                    self.store.mark_delivered(row["id"])
+                except Exception as exc:
+                    try:
+                        self.store.bump_retry(row["id"], str(exc))
+                    except Exception:
+                        pass
 
 
     def home(self, user, range_key="1h", start_at=None, end_at=None):
@@ -1062,18 +1198,19 @@ class Monitor:
             if rule.get("paused"):
                 summary["attention"].append({"project": rule["name"], "detail": "监控已暂停", "time": ""})
         summary["attention"] = summary["attention"][:8]
+        summary["system_title"] = self.store.get_setting("system_title", DEFAULT_SYSTEM_TITLE)
         return summary
 
     def snapshot(self, user):
         allowed = self.allowed_rule_ids(user)
         with self.lock:
-            workers = {key: value.public_state() for key, value in self.workers.items()}
+            workers = {key: combine_worker_state(value) for key, value in self.workers.items()}
             rules = []
             for rule in self.rules:
                 if rule["id"] not in allowed:
                     continue
                 item = dict(rule)
-                item["runtime"] = workers.get(rule["id"], {"state": "stopped"})
+                item["runtime"] = workers.get(rule["id"]) or combine_worker_state(None)
                 rules.append(item)
         return {
             "rules": rules,
@@ -1227,15 +1364,20 @@ class Monitor:
             self._start_worker(rule)
 
     def _start_worker(self, rule):
-        worker = TailWorker(self, rule)
+        group = [TailWorker(self, part) for part in shard_rules(rule)]
         with self.lock:
-            self.workers[rule["id"]] = worker
-        worker.start()
+            self.workers[rule["id"]] = group
+        for worker in group:
+            worker.start()
 
     def _stop_worker(self, rule_id):
         with self.lock:
-            worker = self.workers.pop(rule_id, None)
-        if worker:
+            group = self.workers.pop(rule_id, None)
+        if not group:
+            return
+        if not isinstance(group, list):
+            group = [group]
+        for worker in group:
             worker.stop()
             worker.flush_matches()
 
@@ -1257,6 +1399,9 @@ class TailWorker(threading.Thread):
         self.last_match = None
         self.last_flush = time.time()
         self.buckets = {}
+        self.quiet_sent = {}
+        self.last_quiet_check = 0
+        self.started_at = time.time()
         self.seen = []
         self.reconnect = False
         self.last_wall = time.time()
@@ -1293,6 +1438,7 @@ class TailWorker(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 self._tail()
+                self._arm_reconnect_fill()
                 delay = 2
             except Exception as exc:
                 if self.stop_event.is_set():
@@ -1305,6 +1451,7 @@ class TailWorker(threading.Thread):
                     delay = min(delay * 2, 30)
                     continue
                 self.reconnect = False
+                self._arm_reconnect_fill()
                 self._set(state="running", last_error="")
                 self.stop_event.wait(1)
                 delay = 2
@@ -1393,6 +1540,69 @@ class TailWorker(threading.Thread):
                 self.last_wall = time.time()
                 self._handle_line(line)
 
+    def _arm_reconnect_fill(self):
+        if not self.backfill_offset:
+            self.backfill_offset = "120s"
+
+    def _maybe_quiet(self):
+        if self.rule.get("deploy_mode") != "host":
+            return
+        now = time.time()
+        if now - self.started_at < 900 or now - self.last_quiet_check < 300:
+            return
+        self.last_quiet_check = now
+        for host in namespace_list(self.rule.get("namespace")):
+            try:
+                count = self._recent_count(host)
+            except Exception:
+                continue
+            if count:
+                continue
+            if not should_alert_quiet(self.quiet_sent.get(host), now):
+                continue
+            self.quiet_sent[host] = now
+            when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            text = (
+                "【日志告警】\n"
+                "项目名称：%s\n"
+                "命中关键字：无日志\n"
+                "位置：%s\n"
+                "时间：%s\n"
+                "日志：这台主机最近 15 分钟没有任何日志。"
+            ) % (self.rule["name"], host, when)
+            self._emit(text, "无日志", "这台主机最近 15 分钟没有任何日志。", "", "", when, 1, host)
+
+    def _recent_count(self, host):
+        logs = {
+            "url": self.rule.get("source_url") or self.monitor.config["victorialogs"].get("url", ""),
+            "account_id": self.rule.get("account_id") or self.monitor.config["victorialogs"].get("account_id", "1"),
+            "project_id": self.rule.get("project_id") or self.monitor.config["victorialogs"].get("project_id", "1"),
+        }
+        query = "_time:15m {host=%s} | stats count() as rows" % logsql_quote(host)
+        url = logs["url"].rstrip("/") + "/select/logsql/query"
+        request = urllib.request.Request(
+            url,
+            data=urllib.parse.urlencode({"query": query}).encode(),
+            headers={
+                "AccountID": logs.get("account_id", "1"),
+                "ProjectID": logs.get("project_id", "1"),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+        if not raw.strip():
+            raise RuntimeError("日志条数没有返回")
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if "rows" not in item:
+                continue
+            return int(item["rows"])
+        raise RuntimeError("日志条数没有返回")
+
     def _source_alive(self):
         logs = {
             "url": self.rule.get("source_url") or self.monitor.config["victorialogs"].get("url", ""),
@@ -1435,7 +1645,7 @@ class TailWorker(threading.Thread):
         self._note_match(container)
         now = time.time()
         sample = " ".join(message.split())[:180]
-        bucket = self.buckets.setdefault(keyword, {"count": 0, "last_sent": 0, "samples": []})
+        bucket = self.buckets.setdefault(keyword + "\n" + scope, {"count": 0, "last_sent": 0, "samples": []})
         bucket["count"] += 1
         if sample and sample not in bucket["samples"] and len(bucket["samples"]) < 3:
             bucket["samples"].append(sample)
@@ -1631,6 +1841,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/webhooks":
             self._send_json(self.monitor.store.list_webhooks())
             return
+        if path == "/api/settings":
+            self._send_json({"system_title": self.monitor.store.get_setting("system_title", DEFAULT_SYSTEM_TITLE)})
+            return
         if path == "/api/users":
             if not user["is_admin"]:
                 self._send_json({"error": "只有管理员可以管理人员"}, 403)
@@ -1712,6 +1925,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.monitor.rules = self.monitor.store.list_rules()
                 self.monitor.store.audit(user["display_name"], "保存日志源", "", source["name"])
                 self._send_json(source)
+                return
+            if path == "/api/settings":
+                if not user["is_admin"]:
+                    raise ValueError("只有管理员可以修改系统配置")
+                payload = self._read_json()
+                title = str(payload.get("system_title", "")).strip()
+                if not title:
+                    raise ValueError("系统标题不能为空")
+                self.monitor.store.set_setting("system_title", title[:40])
+                self.monitor.store.audit(user["display_name"], "修改系统配置", "", title[:40])
+                self._send_json({"system_title": title[:40]})
                 return
             if path == "/api/users":
                 if not user["is_admin"]:

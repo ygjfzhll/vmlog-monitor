@@ -3,7 +3,7 @@ import time
 import unittest
 
 import app
-from app import TailWorker, brief_log, build_query, format_log_time, mask_text, monitoring_state, scope_floor, should_watch
+from app import TailWorker, brief_log, build_query, format_log_time, mask_text, monitoring_state, scope_floor, shard_rules, should_alert_quiet, should_watch
 
 
 class FakeStore:
@@ -128,7 +128,8 @@ class MonitorTests(unittest.TestCase):
         item._handle_line(line("[ERROR] second", pod="p2", when="2026-11-13T02:50:00Z"))
         self.assertEqual(len(monitor.messages), 1)
         self.assertEqual(item.public_state()["state"], "starting")
-        item.buckets["[ERROR]"]["last_sent"] = 0
+        for bucket in item.buckets.values():
+            bucket["last_sent"] = 0
         item._handle_line(line("[ERROR] third", pod="p3", when="2026-11-13T03:00:00Z"))
         self.assertEqual(len(monitor.messages), 2)
         self.assertIn("【日志汇总】", monitor.messages[1][0])
@@ -183,6 +184,16 @@ class MonitorTests(unittest.TestCase):
     def test_feishu_text_is_short(self):
         self.assertLessEqual(len(brief_log("x" * 500)), 161)
         self.assertIn("错误", brief_log("  错误   详情  "))
+
+    def test_hosts_are_sharded_and_quiet_alert_waits(self):
+        names = ["h%s" % i for i in range(9)]
+        shards = shard_rules({"deploy_mode": "host", "namespace": names, "containers": ["h1/app", "other"], "keywords": ["ERROR"]})
+        self.assertEqual(len(shards), 2)
+        self.assertEqual(len(shards[0]["namespace"]), 8)
+        self.assertIn("h1/app", shards[0]["containers"])
+        self.assertNotIn("h1/app", shards[1]["containers"])
+        self.assertTrue(should_alert_quiet(0, 100))
+        self.assertFalse(should_alert_quiet(90, 100, 30))
 
 if __name__ == "__main__":
     unittest.main()

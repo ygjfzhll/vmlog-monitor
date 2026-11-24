@@ -30,6 +30,7 @@
     .menu-btn.active { background:#d9e8f6; color:#0f4c81; }
     main { flex:1; min-width:0; min-height:100vh; padding:16px 28px 28px; background:var(--bg); display:flex; flex-direction:column; }
     .home-head { display:flex; justify-content:flex-end; margin-bottom:12px; }
+    .home-title { margin-right:auto; font-size:22px; line-height:40px; font-weight:650; }
     .home-head select, .home-head input { width:180px; }
     .home-head { gap:8px; align-items:center; }
     .stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; margin-bottom:16px; }
@@ -150,7 +151,7 @@
   <main>
     <section id="home">
       <div class="home-head">
-        <div></div>
+        <h1 class="home-title" id="system-title">九州文化日志实时告警系统</h1>
         <input id="home-start" type="datetime-local">
         <span class="muted">至</span>
         <input id="home-end" type="datetime-local">
@@ -272,6 +273,13 @@
         <p id="people-error" class="bad"></p>
       </div>
     </section>
+<section id="settings" class="panel hidden">
+      <h2>系统配置</h2>
+      <label>首页标题</label>
+      <input id="setting-title" maxlength="40" placeholder="九州文化日志实时告警系统">
+      <div class="row"><button id="save-settings" type="button">保存</button></div>
+      <p id="settings-error" class="bad"></p>
+    </section>
 <section id="sources" class="panel hidden">
       <div class="user-tools">
         <button id="open-add-source" type="button">新增日志源</button>
@@ -334,6 +342,7 @@ async function boot() {
   currentUser = await response.json();
   document.body.classList.add("authed");
   $("who").textContent = currentUser.display_name + (currentUser.is_admin ? " · 管理员" : "");
+  renderMenu();
   showOnly("home");
   refresh();
 }
@@ -535,6 +544,7 @@ async function loadHome() {
   const response = await fetch(url);
   const data = await response.json();
   if (!response.ok) { $("home-attention").textContent = data.error || "首页读取失败"; return; }
+  if (data.system_title) $("system-title").textContent = data.system_title;
   $("home-watching").textContent = data.watching;
   $("home-paused").textContent = data.paused ? data.paused + " 个已暂停" : "没有暂停的项目";
   $("home-alerts").textContent = data.alerts_today;
@@ -556,10 +566,35 @@ async function loadHome() {
   $("home-scopes").querySelectorAll("[data-rule]").forEach(row => row.onclick = () => focusScope(row.dataset.rule, row.dataset.container));
   renderAlerts();
 }
+async function loadSettings() {
+  $("settings-error").textContent = "";
+  const response = await fetch("/api/settings");
+  const data = await response.json();
+  if (!response.ok) { $("settings-error").textContent = data.error || "读取失败"; return; }
+  $("setting-title").value = data.system_title || "";
+}
+$("save-settings").onclick = async () => {
+  $("settings-error").textContent = "";
+  const response = await fetch("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ system_title: $("setting-title").value.trim() })
+  });
+  const data = await response.json();
+  if (!response.ok) { $("settings-error").textContent = data.error || "保存失败"; return; }
+  $("system-title").textContent = data.system_title;
+  $("settings-error").textContent = "已保存";
+};
 async function loadPeople() {
-  const data = await (await fetch("/api/users")).json();
-  peopleData = { users: data.users || [], rules: data.rules || [] };
-  renderUserTable();
+  try {
+    const response = await fetch("/api/users");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "用户列表读取失败");
+    peopleData = { users: data.users || [], rules: data.rules || [] };
+    renderUserTable();
+  } catch (error) {
+    $("user-list").textContent = "用户列表没有加载出来：" + error.message;
+  }
 }
 $("user-search").addEventListener("input", renderUserTable);
 $("open-add-user").onclick = () => openUserForm(null);
@@ -667,13 +702,14 @@ function hitTip(hits) {
 function showOnly(panel) {
   $("editor").classList.toggle("hidden", panel !== "editor");
   $("people").classList.toggle("hidden", panel !== "people");
-  const titles = { home: "值班台", people: "用户管理", sources: "日志源管理", hooks: "告警管理", projects: "项目管理", editor: "项目管理" };
+  const titles = { home: "值班台", people: "用户管理", sources: "日志管理", hooks: "告警管理", settings: "系统配置", projects: "项目管理", editor: "项目管理" };
   $("page-title").textContent = titles[panel] || "项目管理";
   $("home").classList.toggle("hidden", panel !== "home");
   $("page-head").classList.toggle("hidden", panel === "home");
   $("main-content").classList.toggle("hidden", panel !== "projects" && panel !== "editor");
   $("sources").classList.toggle("hidden", panel !== "sources");
   $("hooks").classList.toggle("hidden", panel !== "hooks");
+  $("settings").classList.toggle("hidden", panel !== "settings");
   if (panel === "home") loadHome();
   if ($("new-project")) $("new-project").hidden = !(currentUser && currentUser.is_admin);
 }
@@ -681,17 +717,19 @@ function renderMenu() {
   const usersOpen = !$("people").classList.contains("hidden");
   const items = [{ id: "home", name: "首页", kind: "home" }, { id: "projects", name: "项目管理", kind: "projects" }];
   if (currentUser && currentUser.is_admin) {
-    items.push({ id: "sources", name: "日志源管理", kind: "sources" });
+    items.push({ id: "sources", name: "日志管理", kind: "sources" });
     items.push({ id: "hooks", name: "告警管理", kind: "hooks" });
     items.push({ id: "users", name: "用户管理", kind: "users" });
+    items.push({ id: "settings", name: "系统配置", kind: "settings" });
   }
   $("menu-list").innerHTML = items.map(item => {
-    const openKind = !$("people").classList.contains("hidden") ? "users" : !$("sources").classList.contains("hidden") ? "sources" : !$("hooks").classList.contains("hidden") ? "hooks" : !$("home").classList.contains("hidden") ? "home" : "projects";
+    const openKind = !$("settings").classList.contains("hidden") ? "settings" : !$("people").classList.contains("hidden") ? "users" : !$("sources").classList.contains("hidden") ? "sources" : !$("hooks").classList.contains("hidden") ? "hooks" : !$("home").classList.contains("hidden") ? "home" : "projects";
     const active = item.kind === openKind;
     return `<button class="menu-btn${active ? " active" : ""}" type="button" data-menu="${item.kind}">${escapeHtml(item.name)}</button>`;
   }).join("");
   $("menu-list").querySelectorAll("[data-menu]").forEach(btn => btn.onclick = () => {
-    if (btn.dataset.menu === "users") { showOnly("people"); loadPeople(); renderMenu(); }
+    if (btn.dataset.menu === "settings") { showOnly("settings"); loadSettings(); renderMenu(); }
+    else if (btn.dataset.menu === "users") { showOnly("people"); loadPeople(); renderMenu(); }
     else if (btn.dataset.menu === "sources") { showOnly("sources"); loadSources(); renderMenu(); }
     else if (btn.dataset.menu === "hooks") { showOnly("hooks"); loadHooks(); renderMenu(); }
     else if (btn.dataset.menu === "home") { showOnly("home"); renderMenu(); }
@@ -719,6 +757,7 @@ function projectRow(rule) {
 }
 async function refresh() {
   try {
+  renderMenu();
   const response = await fetch("/api/status");
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "读取失败");
