@@ -1210,6 +1210,8 @@ class Monitor:
                 if rule["id"] not in allowed:
                     continue
                 item = dict(rule)
+                if item.get("source_id") and not item.get("source_name"):
+                    self._attach_source(item)
                 item["runtime"] = workers.get(rule["id"]) or combine_worker_state(None)
                 rules.append(item)
         return {
@@ -1236,6 +1238,16 @@ class Monitor:
             self.store.audit(user["display_name"], "继续监控" if not current["paused"] else "暂停监控", rule_id, current["name"])
         return current
 
+    def _attach_source(self, rule):
+        source = next((item for item in self.store.list_sources() if item["id"] == rule.get("source_id")), None)
+        if not source:
+            return rule
+        rule["source_name"] = source.get("name") or ""
+        rule["source_url"] = source.get("base_url") or ""
+        rule["account_id"] = source.get("account_id") or "1"
+        rule["project_id"] = source.get("project_id") or "1"
+        return rule
+
     def upsert(self, payload, rule_id=None, user=None):
         rule = self._normalize(payload, rule_id)
         if rule.get("paused") is None or not rule.get("source_id"):
@@ -1252,6 +1264,7 @@ class Monitor:
                 if hook:
                     rule["webhook"] = hook["hook_url"]
         self.store.save_rule(rule)
+        self._attach_source(rule)
         try:
             backfill = int(payload.get("backfill_sec") or 0)
         except (TypeError, ValueError):
